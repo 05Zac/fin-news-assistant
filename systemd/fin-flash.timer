@@ -1,0 +1,11 @@
+[Unit]
+Description=Every 30s — Fin News Flash (InvestingLive → prefilter → queue drain)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

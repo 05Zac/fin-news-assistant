@@ -1,0 +1,49 @@
+{
+  "name": "fin-news-assistant — v1 thin orchestrator",
+  "nodes": [
+    {
+      "name": "Cron — daily 08:00 Asia/Kuala_Lumpur",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Check feature_flag (read_only guard)",
+      "type": "n8n-nodes-base.executeCommand",
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "command": "python3 -c \"import sqlite3,os; db=os.getenv('DB_PATH','data/fin_news.db'); import pathlib; p=pathlib.Path(db); print('active' if not p.exists() else (sqlite3.connect(db).execute(\\\"SELECT value FROM status WHERE key='feature_flag'\\\").fetchone() or ['active'])[0])\"",
+        "notes": "If read_only (exam week) downstream Execute steps should be disabled via IF node."
+      }
+    },
+    {
+      "name": "Run flash_xau → ingest → resolver → flash_notify → validate → agent_pm",
+      "type": "n8n-nodes-base.executeCommand",
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "command": "python3 src/flash_xau.py --limit 15 && python3 src/ingest.py --limit 10 --symbols USD,XAU && python3 src/resolver.py --limit 50 && python3 src/flash_notify.py --limit 10 && python3 src/validate.py --limit 50 && python3 src/agent_pm.py --limit 50 --post-discord",
+        "notes": "Fable 2026-10-12: flash_xau (InvestingLive RSS + FF Calendar, 0 keys) → ingest → resolver → flash_notify (second webhook DISCORD_FLASH_WEBHOOK_URL, FREE heuristic, before validate/agent_pm) → validate → agent_pm. Thin orchestrator only."
+      }
+    }
+  ],
+  "connections": {},
+  "notes": "Deploy: Linux gateway 24/7 (systemd timer 08:00 Asia/Kuala_Lumpur) or n8n Docker. Chain: flash_xau → ingest → resolver → flash_notify (DISCORD_FLASH_WEBHOOK_URL) → validate → agent_pm. See fin-news.service."
+}

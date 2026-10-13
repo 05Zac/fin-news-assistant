@@ -1,0 +1,29 @@
+# env / secrets
+.env
+.env.local
+
+# sqlite + data (dumb store) — but keep dir structure
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# n8n / node
+n8n-data/
+node_modules/
+
+# os
+.DS_Store
+Thumbs.db

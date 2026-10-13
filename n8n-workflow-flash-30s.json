@@ -1,0 +1,48 @@
+{
+  "name": "fin-news-flash — InvestingLive every 30s → queue",
+  "nodes": [
+    {
+      "name": "Cron — every 30s (InvestingLive flash)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [0, 0],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "notes": "30s matches InvestingLive RSS refresh (~30-60s). Lean poll → prefilter → DB+queue only. Does NOT post to Discord; queue_worker drains next."
+    },
+    {
+      "name": "Poll → Prefilter → Enqueue (flock guarded)",
+      "type": "n8n-nodes-base.executeCommand",
+      "position": [280, 0],
+      "parameters": {
+        "command": "flock -n /tmp/fin-flash.lock bash -c 'cd /home/user/.openclaw/workspace-gpt/fin-news-assistant && python3 src/flash_poll.py --source investinglive --limit 15 --enqueue-only'",
+        "notes": "flock -n = skip if previous poll still running. Enqueues high/medium to flash_queue pending, low to skipped. ~<2s, FREE only."
+      }
+    },
+    {
+      "name": "Queue Worker — drain one (flock guarded)",
+      "type": "n8n-nodes-base.executeCommand",
+      "position": [560, 0],
+      "parameters": {
+        "command": "flock -n /tmp/fin-flash-worker.lock bash -c 'cd /home/user/.openclaw/workspace-gpt/fin-news-assistant && python3 src/queue_worker.py --once'",
+        "notes": "Single-flight FIFO drain: one pending → FREE embed → DISCORD_FLASH_WEBHOOK_URL → done. If busy, next tick picks it up. Paid hook stub inside queue_worker."
+      }
+    }
+  ],
+  "connections": {
+    "Cron — every 30s (InvestingLive flash)": {
+      "main": [[{ "node": "Poll → Prefilter → Enqueue (flock guarded)", "type": "main", "index": 0 }]]
+    },
+    "Poll → Prefilter → Enqueue (flock guarded)": {
+      "main": [[{ "node": "Queue Worker — drain one (flock guarded)", "type": "main", "index": 0 }]]
+    }
+  },
+  "notes": "Deploy: Import to n8n (Settings → Import from File). Keep fin-news-assistant n8n-workflow.json daily 08:00 digest separate. This flash workflow handles 30s live news only (investinglive). Prefilter saves paid tokens, flash_queue guarantees no loss when agent busy."
+}

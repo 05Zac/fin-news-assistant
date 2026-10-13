@@ -1,0 +1,11 @@
+[Unit]
+Description=Fin News Flash — 30s InvestingLive poll → prefilter → queue drain (Linux gateway 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/.openclaw/workspace-gpt/fin-news-assistant
+EnvironmentFile=/home/user/.openclaw/workspace-gpt/fin-news-assistant/.env
+ExecStart=/bin/bash -c 'flock -n /tmp/fin-flash.lock python3 src/flash_poll.py --source investinglive --limit 15 --enqueue-only && flock -n /tmp/fin-flash-worker.lock python3 src/queue_worker.py --once'
+# flock -n prevents overlapping 30s ticks if a run hangs; next tick is skipped
