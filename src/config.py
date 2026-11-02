@@ -69,5 +69,22 @@ def marketaux_token() -> str | None:
 def paid_api_key() -> str | None:
     return os.getenv("PAID_API_KEY")
 
+# --- FREE tier (FreeLLMAPI local router, OpenAI-compatible) ---
+def free_api_key() -> str | None:
+    return os.getenv("FREE_API_KEY")
+
+def free_api_base() -> str:
+    return os.getenv("FREE_API_BASE", "http://127.0.0.1:3001/v1")
+
+def free_model() -> str:
+    return os.getenv("FREE_MODEL", "auto")
+
 def discord_webhook() -> str | None:
     return os.getenv("DISCORD_WEBHOOK_URL")
+
+def finnhub_api_key() -> str | None:
+    return os.getenv("FINNHUB_API_KEY")
+
+def finnhub_token() -> str | None:
+    """Alias for finnhub_api_key — keeps naming consistent with Marketaux helper."""
+    return os.getenv("FINNHUB_API_KEY")

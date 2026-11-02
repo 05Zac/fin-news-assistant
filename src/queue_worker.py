@@ -48,6 +48,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import db_path
 from prefilter import clean_description, classify_relevance
 
+# FREE-tier LLM (FreeLLMAPI). Optional — falls back to None on any issue.
+try:
+    import llm  # type: ignore
+except ImportError:
+    llm = None  # type: ignore
+
 # Reuse Discord posting + embed helpers from flash_notify if available
 try:
     from flash_notify import build_embed as _build_embed, post_discord, sanitize_url
@@ -193,17 +199,28 @@ def validate_row_deterministic(row: sqlite3.Row) -> list[str]:
     return errs
 
 
-def call_agent_pm_for_event(row: sqlite3.Row, relevance: str) -> str | None:
+def call_agent_pm_for_event(row: sqlite3.Row, relevance: str, cleaned: str = "") -> str | None:
     """
-    Hook for paid Event Agent (agent_pm) per-event analysis.
-    Stub: returns None (no LLM call). Wire real call later via config.route("summarize").
-    Keeping signature stable so queue_worker → agent_pm is one line change.
+    Per-event analysis via the FREE tier (FreeLLMAPI local router).
+    Returns a short market-impact note, or None if the free tier is unavailable,
+    the model declines (SKIP), or anything fails — caller posts without the note.
     """
-    # Example when ready:
-    #   from config import route, estimate_tokens, PAID
-    #   tier = route("summarize", estimate_tokens(row["title"]+row["description"]))
-    #   if tier == PAID: call LLM and return summary
-    return None
+    if llm is None or not llm.available():
+        return None
+    try:
+        title = (row["title"] or "")
+        detail = cleaned or (row["description"] or "")
+        symbols = (row["symbols"] or "")
+        note, meta = llm.market_impact_note(title, detail, symbols)
+        if note:
+            print(f"[queue_worker] free-ai note ok model={meta.get('model')} tokens={meta.get('tokens')}")
+        elif meta.get("error") not in (None, "model_skip"):
+            print(f"[queue_worker] free-ai note skipped: {meta.get('error')}")
+        return note
+    except Exception as e:
+        # Never let the LLM path break the 30s loop
+        print(f"[queue_worker] free-ai note error (non-blocking): {e}")
+        return None
 
 
 def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: int = 3) -> str:
@@ -302,7 +319,7 @@ def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: i
     embed = _build_embed(rrow, cleaned, relevance)  # type: ignore
 
     # Optional paid Event Agent hook (stub)
-    agent_note = call_agent_pm_for_event(rrow, relevance)
+    agent_note = call_agent_pm_for_event(rrow, relevance, cleaned)
     if agent_note:
         # If agent returns a note, attach as embed field or content
         embed.setdefault("fields", []).append({"name": "Agent", "value": agent_note[:400], "inline": False})
