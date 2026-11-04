@@ -123,9 +123,44 @@ _IMPACT_SYSTEM = (
     "You are a terse financial-news desk analyst for a USD/XAU (gold) + macro trader. "
     "Given one news headline, output at most 2 sentences: the likely directional impact "
     "on USD and gold (XAU) and why. Be concrete and non-committal where the news is vague. "
-    "No preamble, no disclaimers, no markdown. If the item is not market-relevant, reply "
-    "exactly: SKIP."
+    "Start directly with the impact — do NOT restate, quote, summarize or repeat the "
+    "headline or any input, and do not prefix labels like 'Headline:', 'Impact:' or "
+    "'Analysis:'. No preamble, no disclaimers, no markdown. If the item is not "
+    "market-relevant, reply exactly: SKIP."
 )
+
+import re as _re
+
+# Leading labels/echoes a model might still emit despite the instruction.
+_ECHO_PREFIX_RE = _re.compile(
+    r"^\s*(headline|detail|tagged symbols|symbols|live prices?|news|input|impact|analysis|summary|note)\s*:\s*",
+    _re.IGNORECASE,
+)
+
+
+def _strip_echo(text: str, title: str) -> str:
+    """Remove a leading restatement of the headline / labeled prefix from a note."""
+    if not text:
+        return text
+    out = text.strip()
+    t = (title or "").strip().rstrip(".!?").lower()
+    # Iterate: peel a leading label OR a verbatim headline echo, until neither matches.
+    for _ in range(6):
+        before = out
+        m = _ECHO_PREFIX_RE.match(out)
+        if m:
+            out = out[m.end():].lstrip()
+        if t and len(t) > 12 and out.lower().startswith(t):
+            after = out[len(t):].lstrip(" .:,-—–\n\t")
+            if after:
+                out = after
+        if out == before:
+            break
+    out = out.strip()
+    # If peeling left a lowercase opener, capitalize the first letter for readability.
+    if out and out != text.strip() and out[0].islower():
+        out = out[0].upper() + out[1:]
+    return out
 
 
 def market_impact_note(
@@ -157,6 +192,13 @@ def market_impact_note(
         meta["ok"] = False
         meta["error"] = "model_skip"
         return None, meta
+    if text:
+        text = _strip_echo(text, title)
+        # Re-check: if stripping left nothing meaningful, treat as skip
+        if not text or text.upper().startswith("SKIP"):
+            meta["ok"] = False
+            meta["error"] = "model_skip"
+            return None, meta
     return text, meta
 
 
