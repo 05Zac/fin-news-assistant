@@ -60,7 +60,7 @@ def chat(
     One non-streaming chat completion through FreeLLMAPI.
     Returns (text|None, meta). Never raises.
     """
-    meta = {"model": model or _model(), "tokens": 0, "ok": False, "error": None}
+    meta = {"model": model or _model(), "tokens": 0, "ok": False, "error": None, "finish": None}
     key = _key()
     if not key:
         meta["error"] = "no_free_api_key"
@@ -104,15 +104,21 @@ def chat(
         return None, meta
 
     try:
-        text = (data["choices"][0]["message"]["content"] or "").strip()
+        choice = data["choices"][0]
+        text = (choice["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError) as e:
         meta["error"] = f"shape:{e}"
         return None, meta
 
     usage = data.get("usage") or {}
     meta["tokens"] = int(usage.get("total_tokens") or 0)
+    meta["finish"] = choice.get("finish_reason")
     # FreeLLMAPI echoes the resolved model it actually used
     meta["model"] = data.get("model") or meta["model"]
+    if meta["finish"] == "length":
+        # Truncated by max_tokens (common with reasoning models that spend the
+        # budget on hidden reasoning). Flag it so callers can log/widen.
+        meta["error"] = "truncated_length"
     meta["ok"] = bool(text)
     return (text or None), meta
 
@@ -185,7 +191,7 @@ def market_impact_note(
             {"role": "system", "content": _IMPACT_SYSTEM},
             {"role": "user", "content": user.strip()},
         ],
-        max_tokens=160,
+        max_tokens=600,
         temperature=0.2,
     )
     if text and text.strip().upper().startswith("SKIP"):
@@ -221,6 +227,7 @@ def summarize(headlines_block: str, live_line: str | None = None) -> tuple[str |
             {"role": "system", "content": _SUMMARY_SYSTEM},
             {"role": "user", "content": user.strip()},
         ],
-        max_tokens=500,
+        max_tokens=2000,
         temperature=0.3,
+        timeout=90,
     )

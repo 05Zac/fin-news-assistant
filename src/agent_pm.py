@@ -323,7 +323,9 @@ def main():
                 model_name = meta.get("model") or "free"
                 used_tokens = meta.get("tokens") or est
                 used_tier = FREE
-                print(f"[agent_pm] free-ai summary ok model={model_name} tokens={used_tokens}")
+                fin = meta.get("finish")
+                warn = " [WARN truncated: raise FREE summarize max_tokens]" if fin == "length" else ""
+                print(f"[agent_pm] free-ai summary ok model={model_name} tokens={used_tokens} finish={fin}{warn}")
             else:
                 print(f"[agent_pm] free-ai summary unavailable ({meta.get('error')}) — using deterministic stub")
         else:
