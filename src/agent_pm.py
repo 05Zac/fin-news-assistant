@@ -70,10 +70,15 @@ _PRICE_DISPLAY_MAP: dict[str, str] = {
     "BTC-USD": "BINANCE:BTCUSDT",
     "BTCUSD": "BINANCE:BTCUSDT",
     "BTCUSDT": "BINANCE:BTCUSDT",
+    # Finnhub's "USD" ticker is an unrelated stock; use the UUP dollar-index ETF as the USD proxy
+    "USD": "UUP",
+    "DXY": "UUP",
+    "USDX": "UUP",
 }
 _PRICE_REVERSE_DISPLAY: dict[str, str] = {
     "OANDA:XAU_USD": "XAU",
     "BINANCE:BTCUSDT": "BTC",
+    "UUP": "USD idx (UUP)",
 }
 
 def _to_finnhub_symbol(sym: str) -> str:
@@ -292,7 +297,16 @@ def main():
         # tiered routing: summarize is hard → paid with budget check
         prompt_hint = "\n".join(r["title"] or "" for r in rows[:20])
         est = estimate_tokens(prompt_hint + " summarize USD/XAU macro")
-        tier = route("summarize", estimated_tokens=est)
+        # Real month-to-date paid usage (was always 0, so the headroom guard never fired)
+        try:
+            used_month = conn.execute(
+                "SELECT COALESCE(SUM(tokens_used),0) FROM summaries "
+                "WHERE model_tier='paid' AND model_name NOT LIKE 'stub-%' "
+                "AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            used_month = 0
+        tier = route("summarize", estimated_tokens=est, used_this_month=int(used_month))
         print(f"[agent_pm] tier={tier} est_tokens~{est} (hard→paid, easy→free, headroom applied)")
 
         # FREE tier via FreeLLMAPI; deterministic stub is the fallback.

@@ -81,12 +81,38 @@ def ensure_schema(conn: sqlite3.Connection):
         conn.commit()
 
 
+STALE_PROCESSING_MINUTES = 5  # a single item normally finishes in well under a minute
+
+
+def reclaim_stale(conn: sqlite3.Connection, minutes: int = STALE_PROCESSING_MINUTES, max_attempts: int = 3) -> int:
+    """Return stale 'processing' rows to 'pending' (or 'failed' once out of attempts)."""
+    cutoff = f"-{minutes} minutes"
+    cur = conn.execute(
+        """
+        UPDATE flash_queue
+        SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END,
+            error = 'reclaimed: stuck in processing > ' || ? || 'm'
+        WHERE status='processing'
+          AND (processed_at IS NULL OR datetime(processed_at) < datetime('now', ?))
+        """,
+        (max_attempts, minutes, cutoff),
+    )
+    conn.commit()
+    if cur.rowcount:
+        print(f"[queue_worker] reclaimed {cur.rowcount} stale 'processing' row(s)")
+    return cur.rowcount
+
+
 def dequeue_one(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """
     Atomically claim the oldest 'pending' row.
     Uses BEGIN IMMEDIATE to serialize workers (flock also guards n8n overlap).
     Returns the claimed row or None if nothing pending or another worker holds 'processing'.
     """
+    # Recover rows stuck in 'processing' (worker crashed/killed mid-item). Without this a
+    # single stale row blocks the single-flight guard below forever.
+    reclaim_stale(conn)
+
     # Guard: if something is already 'processing', don't claim another (single-flight)
     cur = conn.execute("SELECT 1 FROM flash_queue WHERE status='processing' LIMIT 1")
     if cur.fetchone():
@@ -110,7 +136,7 @@ def dequeue_one(conn: sqlite3.Connection) -> sqlite3.Row | None:
 
         # Claim it
         now_iso = datetime.now(timezone.utc).isoformat()
-        conn.execute(
+        upd = conn.execute(
             """
             UPDATE flash_queue
             SET status='processing', attempts=attempts+1, processed_at=?
@@ -118,7 +144,8 @@ def dequeue_one(conn: sqlite3.Connection) -> sqlite3.Row | None:
             """,
             (now_iso, row["id"]),
         )
-        if conn.total_changes == 0:
+        # rowcount = rows changed by THIS statement (total_changes is cumulative per connection)
+        if upd.rowcount == 0:
             conn.execute("ROLLBACK")
             return None
         conn.execute("COMMIT")

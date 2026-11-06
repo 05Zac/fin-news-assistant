@@ -230,11 +230,16 @@ _PRICE_DISPLAY_MAP: dict[str, str] = {
     "BTC-USD": "BINANCE:BTCUSDT",
     "BTCUSD": "BINANCE:BTCUSDT",
     "BTCUSDT": "BINANCE:BTCUSDT",
+    # Finnhub's "USD" ticker is an unrelated stock; use the UUP dollar-index ETF as the USD proxy
+    "USD": "UUP",
+    "DXY": "UUP",
+    "USDX": "UUP",
 }
 
 _PRICE_REVERSE_DISPLAY: dict[str, str] = {
     "OANDA:XAU_USD": "XAU",
     "BINANCE:BTCUSDT": "BTC",
+    "UUP": "USD idx (UUP)",
 }
 
 
