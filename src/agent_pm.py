@@ -2,11 +2,11 @@
 agent_pm.py — Agent PM reads DB LIMIT 50 and summarizes what is happening.
 
 Locked arch: SQLite dumb text store (WAL) + Agent PM reader/manager.
-Tiered routing: summarize = hard → paid 3.8B API (sunk cost), fallback free.
+LLM: free tier (FreeLLMAPI) via llm.py; deterministic stub is the fallback.
 RTK + headroom budget checked before every LLM call (stub via config.estimate_tokens).
 
-v1 stub: no real LLM call yet — builds deterministic summary from DB rows,
-inserts into summaries, updates status. Swap `call_llm()` with real client later.
+Builds a free-tier AI summary from DB rows (deterministic summary as fallback),
+inserts into summaries, updates status. AI text comes from the free tier (llm.py).
 
 Usage:
     python src/agent_pm.py
@@ -26,10 +26,10 @@ from dotenv import load_dotenv
 # allow `python src/agent_pm.py` and `python -m src.agent_pm`
 sys.path.insert(0, str(Path(__file__).parent))
 try:
-    from config import db_path, discord_webhook, estimate_tokens, route, FREE, PAID  # noqa: E402  # python src/agent_pm.py
+    from config import db_path, discord_webhook, estimate_tokens, route, FREE  # noqa: E402  # python src/agent_pm.py
     _HAS_CONFIG = True
 except ImportError:
-    from src.config import db_path, discord_webhook, estimate_tokens, route, FREE, PAID  # noqa: E402  # python -m src.agent_pm
+    from src.config import db_path, discord_webhook, estimate_tokens, route, FREE  # noqa: E402  # python -m src.agent_pm
     _HAS_CONFIG = True
 
 # --- optional live price (Finnhub) — never log key ---
@@ -228,24 +228,9 @@ def build_stub_summary(rows: list[sqlite3.Row]) -> str:
     lines += [
         "",
         "Next: Evidence Bundle → Fact Extraction → Validation → Discord (full pipeline v1).",
-        "Note: stub summary (no LLM). Wire call_llm() to paid tier when ready.",
+        "Note: deterministic stub (free-tier AI was unavailable for this run).",
     ]
     return "\n".join(lines)
-
-
-def call_llm_stub(prompt: str, tier: str) -> str:
-    """
-    Placeholder for real LLM call.
-    - tier == 'paid' → would use PAID_API_KEY (OpenAI/Anthropic 3.8B quota)
-    - tier == 'free' → free-tier model
-    For v1, return empty so caller falls back to stub. Keep signature stable.
-    """
-    # Example real wiring (commented, minimal):
-    # if tier == PAID and os.getenv("PAID_API_KEY"):
-    #     client = OpenAI(api_key=os.getenv("PAID_API_KEY"))
-    #     resp = client.chat.completions.create(model="gpt-4o-mini", messages=[...])
-    #     return resp.choices[0].message.content
-    return ""
 
 
 def post_discord(webhook_url: str, text: str) -> bool:
@@ -294,20 +279,9 @@ def main():
         rows = fetch_recent(conn, limit=args.limit)
         print(f"[agent_pm] read {len(rows)} rows (LIMIT {args.limit}) from {db}")
 
-        # tiered routing: summarize is hard → paid with budget check
         prompt_hint = "\n".join(r["title"] or "" for r in rows[:20])
         est = estimate_tokens(prompt_hint + " summarize USD/XAU macro")
-        # Real month-to-date paid usage (was always 0, so the headroom guard never fired)
-        try:
-            used_month = conn.execute(
-                "SELECT COALESCE(SUM(tokens_used),0) FROM summaries "
-                "WHERE model_tier='paid' AND model_name NOT LIKE 'stub-%' "
-                "AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')"
-            ).fetchone()[0]
-        except sqlite3.OperationalError:
-            used_month = 0
-        tier = route("summarize", estimated_tokens=est, used_this_month=int(used_month))
-        print(f"[agent_pm] tier={tier} est_tokens~{est} (hard→paid, easy→free, headroom applied)")
+        tier = FREE
 
         # FREE tier via FreeLLMAPI; deterministic stub is the fallback.
         llm_text = None

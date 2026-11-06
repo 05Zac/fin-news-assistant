@@ -23,9 +23,9 @@ Usage:
   python src/queue_worker.py --drain --limit 50 --loop  # loop until empty (for systemd)
 
 Chain: flash_poll.py (30s enqueue) → this worker (30s dequeue) → Discord.
-Event agent hook: call_agent_pm_for_event() stub kept for paid tier.
+Event agent hook: call_agent_pm_for_event() adds a free-tier AI impact note.
 
-Tier: processing uses FREE heuristic for embed; agent_pm hook may use PAID.
+Tier: FREE only (heuristic gate + FreeLLMAPI note).
 """
 
 import argparse
@@ -345,7 +345,7 @@ def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: i
 
     embed = _build_embed(rrow, cleaned, relevance)  # type: ignore
 
-    # Optional paid Event Agent hook (stub)
+    # Free-tier Event Agent note (optional; None if unavailable)
     agent_note = call_agent_pm_for_event(rrow, relevance, cleaned)
     if agent_note:
         # If agent returns a note, attach as embed field or content
@@ -362,7 +362,7 @@ def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: i
 
 def main():
     load_dotenv()
-    p = argparse.ArgumentParser(description="Queue worker — FIFO flash_queue → Discord (FREE gate + optional paid hook)")
+    p = argparse.ArgumentParser(description="Queue worker — FIFO flash_queue → Discord (FREE gate + free-tier AI note)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--once", action="store_true", help="process one pending item and exit")
     g.add_argument("--drain", action="store_true", help="drain up to --limit items in sequence")

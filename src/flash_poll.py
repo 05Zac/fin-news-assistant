@@ -9,7 +9,7 @@ Flow:
     prefilter (clean → relevance → dedupe_key → is_duplicate window)
     if url dup or dedupe_key dup in 15m → skip entirely
     else store to raw_events, then enqueue to flash_queue:
-      high/medium → status='pending' (worker will process → paid event agent)
+      high/medium → status='pending' (worker posts + free-tier AI note)
       low         → status='skipped' (stored for audit, no LLM cost)
 
 Enqueue-only: keeps poll fast (<2s) and idempotent via URL+dedupe_key.

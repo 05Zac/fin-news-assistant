@@ -95,12 +95,12 @@ def clean_description(raw: str, limit: int = 300) -> str:
 def classify_relevance(title: str, description: str, symbols: str = "") -> str:
     """
     FREE-tier classifier (heuristic). Returns high|medium|low.
-    Hook for future LLM fin-classifier: replace body with route("classify") → PAID/FREE LLM call.
+    Hook for future LLM fin-classifier: replace body with route("classify") → free-tier LLM call.
     """
     hay = f"{title or ''} {description or ''} {symbols or ''}".lower()
     # hook placeholder — when fin-classifier LLM is ready:
     #   tier = route("classify", estimate_tokens(hay))
-    #   if tier == PAID: return call_llm_classifier(hay)
+    #   return call_llm_classifier(hay)
     if any(k in hay for k in HIGH_KEYWORDS):
         return "high"
     if any(k in hay for k in MEDIUM_KEYWORDS):

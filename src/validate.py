@@ -1,18 +1,18 @@
 """
-validate.py — deterministic checks + optional claude-opus-4.7 verifier (cost-no-object).
+validate.py — deterministic checks + optional free-tier LLM verifier.
 
 Deterministic stage (always): required fields, ISO dates, URL, symbol tagging.
-LLM stage (opt-in): when PAID_API_KEY is set, calls VERIFIER_MODEL (default claude-opus-4.7,
-fallback claude-fable-5.1 on low_confidence/conflict) via CodeCraft /v1 to score
-{title,time,entity,source} credibility and return structured JSON. Never uses free tier.
+LLM stage: when FREE_API_KEY is set, calls VERIFIER_MODEL (default "auto",
+fallback "auto:smart" on low_confidence/conflict) via the local FreeLLMAPI router
+to score {title,time,entity,source} credibility and return structured JSON.
 
 Usage:
     python src/validate.py --limit 20
     python src/validate.py --limit 20 --with-llm        # force LLM verifier
     python src/validate.py --limit 20 --no-llm           # deterministic only
-    VERIFIER_MODEL=claude-opus-4.7 python src/validate.py --with-llm
+    VERIFIER_MODEL=auto:smart python src/validate.py --with-llm
 
-Env: PAID_API_KEY, VERIFIER_MODEL, VERIFIER_FALLBACK, DB_PATH (see src/config.py)
+Env: FREE_API_KEY, FREE_API_BASE, VERIFIER_MODEL, VERIFIER_FALLBACK, DB_PATH (see src/config.py)
 """
 
 import argparse
@@ -40,14 +40,15 @@ from config import (  # noqa: E402
     discord_webhook,
     VERIFIER_MODEL,
     db_path,
-    paid_api_key,
+    free_api_base,
+    free_api_key,
 )
 
-CODECRAFT_BASE = os.getenv("CODECRAFT_BASE_URL", "https://codecraftapi.com/v1")
+LLM_BASE = free_api_base()  # local FreeLLMAPI router (OpenAI-compatible)
 KL_TZ = zoneinfo.ZoneInfo("Asia/Kuala_Lumpur")
 
 VERIFIER_SYSTEM = """You are a strict financial news verifier. Given an Evidence Bundle item \
-(title, published_at, url, symbols, description/snippet), score it WITHOUT hallucinating.
+(today_utc, title, published_at, url, symbols, description/snippet), score it WITHOUT hallucinating.\nJudge dates against today_utc, not your training data: news dated today or recently is NOT "future".
 
 Return JSON only with keys:
 - verdict: "ok" | "flag" | "reject"
@@ -93,7 +94,7 @@ TRANSIENT_SUBSTRINGS = [
 ]
 
 def _is_transient_error(exc: BaseException) -> bool:
-    """True for network / rate-limit / temporary CodeCraft failures that must not be fatal."""
+    """True for network / rate-limit / temporary LLM failures that must not be fatal."""
     if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
         return True
     if isinstance(exc, requests.exceptions.HTTPError) and getattr(exc, "response", None) is not None:
@@ -111,6 +112,30 @@ def _is_transient_error(exc: BaseException) -> bool:
 def _sleep_with_jitter(base: float, attempt: int) -> None:
     delay = base * (2 ** attempt) + random.uniform(0, 0.5)
     time.sleep(delay)
+
+
+def _parse_json(content) -> dict:
+    """Parse a JSON verdict, tolerating models that wrap it in reasoning or <think> text."""
+    import re
+    if not isinstance(content, str):
+        return content
+    text = re.sub(r"<think>.*?(</think>|$)", "", content, flags=re.S | re.I).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    dec = json.JSONDecoder()
+    found = None
+    for m in re.finditer(r"\{", text):  # keep the LAST valid object (the final answer)
+        try:
+            obj, _ = dec.raw_decode(text, m.start())
+            if isinstance(obj, dict):
+                found = obj
+        except ValueError:
+            continue
+    if found is None:
+        raise ValueError("no JSON object in verifier reply")
+    return found
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -163,7 +188,7 @@ def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3
         "analyst_preview": analyst_preview,
         "count": len(rows),
     }, ensure_ascii=False)
-    url = f"{CODECRAFT_BASE.rstrip('/')}/chat/completions"
+    url = f"{LLM_BASE.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
         "model": model,
@@ -173,7 +198,7 @@ def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3
         ],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
-        "max_tokens": 2048,
+        "max_tokens": 3000,
     }
     last_exc: BaseException | None = None
     for attempt in range(retries + 1):
@@ -182,14 +207,7 @@ def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"]
-            try:
-                return json.loads(content) if isinstance(content, str) else content
-            except Exception:
-                import re
-                m = re.search(r"\{.*\}", content, re.S)
-                if m:
-                    return json.loads(m.group(0))
-                raise
+            return _parse_json(content)
         except Exception as e:
             last_exc = e
             if _is_transient_error(e) and attempt < retries:
@@ -284,6 +302,8 @@ def build_verifier_user_payload(row: sqlite3.Row) -> str:
         snippet = (row["description"] if "description" in row.keys() else "") or ""
         snippet = snippet[:600]
     payload = {
+        # Free models don't know the current date; without this they flag real news as "future".
+        "today_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "title": row["title"],
         "published_at": row["published_at"],
         "url": row["url"],
@@ -294,9 +314,9 @@ def build_verifier_user_payload(row: sqlite3.Row) -> str:
 
 
 def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int = 60, retries: int = 3, base_delay: float = 2.0) -> dict | None:
-    """Call CodeCraft verifier with exponential backoff on 429/503/timeout. Returns parsed JSON verdict or raises."""
+    """Call the free-tier verifier with exponential backoff on 429/503/timeout. Returns parsed JSON verdict or raises."""
     import requests as req
-    url = f"{CODECRAFT_BASE.rstrip('/')}/chat/completions"
+    url = f"{LLM_BASE.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
         "model": model,
@@ -306,7 +326,7 @@ def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int =
         ],
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
-        "max_tokens": 2048,
+        "max_tokens": 3000,
     }
     last_exc: BaseException | None = None
     for attempt in range(retries + 1):
@@ -315,14 +335,7 @@ def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int =
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"]
-            try:
-                return json.loads(content) if isinstance(content, str) else content
-            except Exception:
-                import re
-                m = re.search(r"\{.*\}", content, re.S)
-                if m:
-                    return json.loads(m.group(0))
-                raise
+            return _parse_json(content)
         except Exception as e:
             last_exc = e
             if _is_transient_error(e) and attempt < retries:
@@ -360,9 +373,9 @@ def main():
         load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"))
     except AssertionError:
         load_dotenv(dotenv_path=".env")
-    p = argparse.ArgumentParser(description="Validate raw_events — deterministic + optional claude-opus-4.7")
+    p = argparse.ArgumentParser(description="Validate raw_events — deterministic + optional free-tier verifier")
     p.add_argument("--limit", type=int, default=50)
-    p.add_argument("--with-llm", action="store_true", help="force LLM verifier (needs PAID_API_KEY)")
+    p.add_argument("--with-llm", action="store_true", help="force LLM verifier (needs FREE_API_KEY)")
     p.add_argument("--no-llm", action="store_true", help="skip LLM verifier")
     p.add_argument("--verifier-model", default=None, help="override VERIFIER_MODEL for this run")
     p.add_argument("--today", action="store_true", help="only verify items where published_at KL date == today (Asia/Kuala_Lumpur) — used for fin-analyst same-day input")
@@ -425,14 +438,14 @@ def main():
                 return
 
         # decide LLM mode
-        api_key = paid_api_key()
+        api_key = free_api_key()
         use_llm = False
         if args.no_llm:
             use_llm = False
         elif args.with_llm:
             use_llm = True
             if not api_key:
-                print("[validate] --with-llm requested but PAID_API_KEY not set — deterministic only.", file=sys.stderr)
+                print("[validate] --with-llm requested but FREE_API_KEY not set — deterministic only.", file=sys.stderr)
                 use_llm = False
         else:
             # auto: LLM only if key present and at least one row looks like real news (not stub)

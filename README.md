@@ -23,17 +23,17 @@ Out of scope for v1: multi-agent factory, Jin10, dashboard UI, trading signals, 
 | Orchestrator | n8n (thin) | Timer + Discord webhook only; logic in Python/SQL so n8n crash doesn't kill evidence |
 | Language | Python 3.11+ | scraper / extraction / cleaning / dedup / validation |
 | Store | SQLite WAL, text-only | dumb store, not for manual reading; Agent PM reads & summarizes; daily Parquet snapshots |
-| Agent PM | Paid 3.8B API (sunk cost) | reads DB LIMIT 50, summarizes what's happening |
-| AI routing | Tiered: easy→free / hard→paid | RTK + headroom budget before every call |
-| Cost | ~RM0 new spend | Linux gateway sunk + self-hosted n8n/SQLite; paid API already subscribed |
+| Agent PM | Free tier (FreeLLMAPI) | reads DB LIMIT 50, summarizes what's happening |
+| AI | Free tier only — local FreeLLMAPI router (`src/llm.py`) | Notes, daily summary and verifier; deterministic fallback if unavailable |
+| Cost | ~RM0 new spend | Linux gateway sunk + self-hosted n8n/SQLite + free LLM tiers |
 
 ## Architecture Principles
 
 1. SQLite = storage, Agent = reader/manager — never manually browse DB as source of truth.
 2. Python/SQL/n8n/AI separation — n8n thin, logic portable.
 3. Make it work first, then optimize. Minimal working slice > perfect design.
-4. Free tier for grunt (fetch/clean/dedup), paid for reasoning (extraction/analysis).
-5. RTK + headroom check before every LLM call — budget > quota.
+4. Free-tier LLMs for all AI work; deterministic code for fetch/clean/dedup.
+5. Every LLM call is time-boxed and falls back to deterministic output on failure.
 
 ## Project Structure
 
@@ -57,7 +57,7 @@ cd fin-news-assistant
 
 # 2. Env
 cp .env.example .env
-# edit .env → MARKET_AUX_API_TOKEN, DISCORD_WEBHOOK_URL, PAID_API_KEY
+# edit .env → MARKET_AUX_API_TOKEN, DISCORD_WEBHOOK_URL, FREE_API_KEY (FreeLLMAPI unified key)
 
 # 3. Python env
 python -m venv .venv && source .venv/bin/activate

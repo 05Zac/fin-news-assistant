@@ -1,7 +1,7 @@
 """
 prefilter.py — FREE-tier gate before Event Agent (agent_pm / flash_notify).
 
-Purpose: save paid 3.8B tokens by dropping duplicates + LOW relevance
+Purpose: save LLM calls by dropping duplicates + LOW relevance
 before any LLM call. Used by flash_poll.py (30s RSS) and queue_worker.py.
 
 - HTML strip + truncate (~300 chars, FREE, no LLM)
