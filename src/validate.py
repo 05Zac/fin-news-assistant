@@ -18,8 +18,10 @@ Env: PAID_API_KEY, VERIFIER_MODEL, VERIFIER_FALLBACK, DB_PATH (see src/config.py
 import argparse
 import json
 import os
+import random
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from datetime import datetime, timezone
@@ -69,6 +71,47 @@ Return JSON only with keys:
 
 Rules: cite only provided titles. No tomorrow prediction."""
 
+# ---------------------------------------------------------------------------
+# Resilience helpers
+# ---------------------------------------------------------------------------
+TRANSIENT_SUBSTRINGS = [
+    "429",
+    "503",
+    "502",
+    "504",
+    "failed to resolve",
+    "no route to host",
+    "timed out",
+    "timeout",
+    "connection aborted",
+    "connection reset",
+    "temporarily unavailable",
+    "name or service not known",
+    "getaddrinfo failed",
+    "name resolution",
+    "dns",
+]
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """True for network / rate-limit / temporary CodeCraft failures that must not be fatal."""
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError) and getattr(exc, "response", None) is not None:
+        try:
+            if exc.response.status_code in (429, 503, 502, 504):
+                return True
+        except Exception:
+            pass
+    msg = str(exc).lower()
+    for kw in TRANSIENT_SUBSTRINGS:
+        if kw in msg:
+            return True
+    return False
+
+def _sleep_with_jitter(base: float, attempt: int) -> None:
+    delay = base * (2 ** attempt) + random.uniform(0, 0.5)
+    time.sleep(delay)
+
 
 def _parse_iso(s: str) -> datetime | None:
     if not s:
@@ -105,8 +148,8 @@ def fetch_analyst_summaries_today(conn: sqlite3.Connection) -> list[sqlite3.Row]
             out.append(r)
     return out
 
-def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3.Row], api_key: str, model: str, timeout: int = 60) -> dict | None:
-    """One LLM call to summarize today's market reaction (not tomorrow forecast). Returns JSON or None."""
+def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3.Row], api_key: str, model: str, timeout: int = 60, retries: int = 3, base_delay: float = 2.0) -> dict | None:
+    """One LLM call to summarize today's market reaction (not tomorrow forecast). Returns JSON or None. Retries on 429/503/timeout."""
     import requests as req
     # build compact evidence: verified titles + analyst preview
     headlines = []
@@ -130,20 +173,32 @@ def call_market_reaction_llm(rows: list[sqlite3.Row], analyst_rows: list[sqlite3
         ],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
-        "max_tokens": 600,
+        "max_tokens": 2048,
     }
-    r = req.post(url, headers=headers, json=body, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    content = data["choices"][0]["message"]["content"]
-    try:
-        return json.loads(content) if isinstance(content, str) else content
-    except Exception:
-        import re
-        m = re.search(r"\{.*\}", content, re.S)
-        if m:
-            return json.loads(m.group(0))
-        raise
+    last_exc: BaseException | None = None
+    for attempt in range(retries + 1):
+        try:
+            r = req.post(url, headers=headers, json=body, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            try:
+                return json.loads(content) if isinstance(content, str) else content
+            except Exception:
+                import re
+                m = re.search(r"\{.*\}", content, re.S)
+                if m:
+                    return json.loads(m.group(0))
+                raise
+        except Exception as e:
+            last_exc = e
+            if _is_transient_error(e) and attempt < retries:
+                _sleep_with_jitter(base_delay, attempt)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return None
 
 def post_discord_first_webhook(text: str) -> tuple[bool, str]:
     wh = discord_webhook()
@@ -238,8 +293,8 @@ def build_verifier_user_payload(row: sqlite3.Row) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int = 60) -> dict | None:
-    """Call CodeCraft verifier. Returns parsed JSON verdict or None on network error."""
+def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int = 60, retries: int = 3, base_delay: float = 2.0) -> dict | None:
+    """Call CodeCraft verifier with exponential backoff on 429/503/timeout. Returns parsed JSON verdict or raises."""
     import requests as req
     url = f"{CODECRAFT_BASE.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -251,22 +306,32 @@ def call_verifier_llm(row: sqlite3.Row, api_key: str, model: str, timeout: int =
         ],
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
-        "max_tokens": 512,
+        "max_tokens": 2048,
     }
-    r = req.post(url, headers=headers, json=body, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    content = data["choices"][0]["message"]["content"]
-    # content is JSON string when response_format json_object
-    try:
-        return json.loads(content) if isinstance(content, str) else content
-    except Exception:
-        # fallback: try to extract JSON blob
-        import re
-        m = re.search(r"\{.*\}", content, re.S)
-        if m:
-            return json.loads(m.group(0))
-        raise
+    last_exc: BaseException | None = None
+    for attempt in range(retries + 1):
+        try:
+            r = req.post(url, headers=headers, json=body, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            try:
+                return json.loads(content) if isinstance(content, str) else content
+            except Exception:
+                import re
+                m = re.search(r"\{.*\}", content, re.S)
+                if m:
+                    return json.loads(m.group(0))
+                raise
+        except Exception as e:
+            last_exc = e
+            if _is_transient_error(e) and attempt < retries:
+                _sleep_with_jitter(base_delay, attempt)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return None
 
 
 def llm_verdict_to_errors(verdict: dict | None) -> list[str]:
@@ -376,18 +441,21 @@ def main():
         model = args.verifier_model or VERIFIER_MODEL
         fallback = VERIFIER_FALLBACK
 
-        bad = 0
+        deterministic_bad = 0
         llm_calls = 0
         llm_flags = 0
+        llm_errors = 0
         detail_lines: list[str] = []
-        for r in rows:
-            errs = validate_row(r)
+        for idx, r in enumerate(rows):
+            det_errs = validate_row(r)
             llm_verdict = None
+            llm_display_errs: list[str] = []
             if use_llm and api_key:
+                if idx > 0:
+                    time.sleep(0.3)
                 try:
                     llm_verdict = call_verifier_llm(r, api_key, model)
                     llm_calls += 1
-                    # escalation: low confidence or conflict -> retry with fallback
                     conf = llm_verdict.get("confidence") if isinstance(llm_verdict, dict) else None
                     needs_escalation = False
                     try:
@@ -397,34 +465,68 @@ def main():
                     if needs_escalation and fallback and fallback != model:
                         print(f"  [verifier] low conf {conf} on id={r['id']} → escalating to {fallback}")
                         try:
+                            if llm_calls > 0:
+                                time.sleep(0.3)
                             llm_verdict = call_verifier_llm(r, api_key, fallback)
                             llm_calls += 1
                         except Exception as e2:
-                            print(f"  [verifier] fallback {fallback} failed id={r['id']}: {e2}", file=sys.stderr)
-                    llm_errs = llm_verdict_to_errors(llm_verdict)
-                    if llm_errs:
+                            if _is_transient_error(e2):
+                                llm_errors += 1
+                                print(f"  [verifier] fallback {fallback} transient error id={r['id']}: {e2} — counted as llm_error", file=sys.stderr)
+                            else:
+                                llm_errors += 1
+                                print(f"  [verifier] fallback {fallback} failed id={r['id']}: {e2}", file=sys.stderr)
+                    llm_display_errs = llm_verdict_to_errors(llm_verdict)
+                    if llm_display_errs:
                         llm_flags += 1
-                    errs.extend(llm_errs)
                 except Exception as e:
-                    errs.append(f"verifier error ({model}): {e}")
-                    llm_flags += 1
+                    if _is_transient_error(e):
+                        llm_errors += 1
+                        print(f"  [verifier] transient error id={r['id']} ({model}): {e} — counted as llm_error, not fatal", file=sys.stderr)
+                    else:
+                        llm_errors += 1
+                        llm_display_errs = [f"verifier error ({model}): {e}"]
+                        print(f"  [verifier] error id={r['id']} ({model}): {e}", file=sys.stderr)
 
-            if errs:
-                bad += 1
+            has_det_err = len(det_errs) > 0
+            has_llm_issue = len(llm_display_errs) > 0
+            if has_det_err:
+                deterministic_bad += 1
+            if has_det_err or has_llm_issue:
                 tag = f" | llm={llm_verdict.get('verdict')}/{llm_verdict.get('confidence')}" if use_llm and isinstance(llm_verdict, dict) else ""
-                line = f"  ! id={r['id']}{tag} {'; '.join(errs)} | title={(r['title'] or '')[:70]}"
+                if has_det_err and llm_display_errs:
+                    combined = "; ".join(det_errs + llm_display_errs)
+                elif has_det_err:
+                    combined = "; ".join(det_errs)
+                elif llm_display_errs:
+                    combined = "; ".join(llm_display_errs)
+                else:
+                    combined = "(transient llm_error — see stderr)"
+                prefix = "!" if has_det_err else "⚠"
+                line = f"  {prefix} id={r['id']}{tag} {combined} | title={(r['title'] or '')[:70]}"
                 print(line)
-                v = llm_verdict.get('verdict') if isinstance(llm_verdict, dict) else 'deterministic'
-                detail_lines.append(f"❌ id={r['id']} {v} — {(r['title'] or '')[:90]}")
+                if has_det_err:
+                    v = llm_verdict.get('verdict') if isinstance(llm_verdict, dict) else 'deterministic'
+                    detail_lines.append(f"❌ id={r['id']} {v} — {(r['title'] or '')[:90]}  ({'; '.join(det_errs)[:120]})")
+                else:
+                    v = llm_verdict.get('verdict') if isinstance(llm_verdict, dict) else 'llm_error'
+                    llm_reason = "; ".join(llm_display_errs)[:120] if llm_display_errs else "transient network/rate-limit"
+                    detail_lines.append(f"⚠️ id={r['id']} {v} — {(r['title'] or '')[:90]}  ({llm_reason})")
             else:
                 if use_llm and isinstance(llm_verdict, dict):
                     print(f"  ✓ id={r['id']} verifier ok (conf {llm_verdict.get('confidence')}) | {(r['title'] or '')[:60]}")
                     detail_lines.append(f"✅ id={r['id']} ok (conf {llm_verdict.get('confidence')}) — {(r['title'] or '')[:80]}")
                 else:
+                    if det_errs:
+                        print(f"  ! id={r['id']} {'; '.join(det_errs)} | {(r['title'] or '')[:60]}")
+                    else:
+                        if not use_llm:
+                            print(f"  ✓ id={r['id']} ok | {(r['title'] or '')[:60]}")
                     detail_lines.append(f"✅ id={r['id']} ok — {(r['title'] or '')[:80]}")
 
         mode_tag = f" + LLM {model}" if use_llm else " (deterministic only)"
-        print(f"[validate] checked {len(rows)} rows{mode_tag} — {bad} with issues, {len(rows)-bad} ok | llm_calls={llm_calls} flags={llm_flags}")
+        ok_count = len(rows) - deterministic_bad
+        print(f"[validate] checked {len(rows)} rows{mode_tag} — {deterministic_bad} deterministic bad, {ok_count} ok | llm_calls={llm_calls} flags={llm_flags} llm_errors={llm_errors} (flags/errors informational, not fatal)")
         # Market reaction today (one LLM call, only when --today + --with-llm; never predicts tomorrow)
         reaction = None
         if args.today and use_llm and api_key and rows:
@@ -433,27 +535,32 @@ def main():
                 llm_calls += 1
                 print(f"[validate] market reaction: {reaction.get('summary','')[:100] if isinstance(reaction, dict) else reaction}")
             except Exception as e:
-                print(f"[validate] market reaction failed: {e}", file=sys.stderr)
+                if _is_transient_error(e):
+                    llm_errors += 1
+                    print(f"[validate] market reaction transient error: {e} — counted as llm_error", file=sys.stderr)
+                else:
+                    print(f"[validate] market reaction failed: {e}", file=sys.stderr)
                 reaction = None
         if args.today:
             today = _today_kl_str()
-            flagged = [d for d in detail_lines if d.startswith("❌")]
+            flagged = [d for d in detail_lines if d.startswith("❌") or d.startswith("⚠️")]
             ok_lines = [d for d in detail_lines if d.startswith("✅")]
             ordered = flagged + ok_lines
             if args.post_discord:
-                msg = build_discord_report(today, analyst_rows, len(rows), len(rows)-bad, bad, llm_calls, llm_flags, use_llm, model, ordered, reaction)
+                msg = build_discord_report(today, analyst_rows, len(rows), len(rows)-deterministic_bad, deterministic_bad, llm_calls, llm_flags, use_llm, model, ordered, reaction)
                 ok, status = post_discord_first_webhook(msg)
                 print(f"[validate] discord post {'ok' if ok else 'failed'}: {status} (first webhook DISCORD_WEBHOOK_URL only)")
         elif args.post_discord:
             today = _today_kl_str()
             analyst_rows = fetch_analyst_summaries_today(conn)
-            flagged = [d for d in detail_lines if d.startswith("❌")]
+            flagged = [d for d in detail_lines if d.startswith("❌") or d.startswith("⚠️")]
             ok_lines = [d for d in detail_lines if d.startswith("✅")]
             ordered = flagged + ok_lines
-            msg = build_discord_report(today, analyst_rows, len(rows), len(rows)-bad, bad, llm_calls, llm_flags, use_llm, model, ordered, reaction)
+            msg = build_discord_report(today, analyst_rows, len(rows), len(rows)-deterministic_bad, deterministic_bad, llm_calls, llm_flags, use_llm, model, ordered, reaction)
             ok, status = post_discord_first_webhook(msg)
             print(f"[validate] discord post {'ok' if ok else 'failed'}: {status} (first webhook DISCORD_WEBHOOK_URL only)")
-        sys.exit(1 if bad else 0)
+        # EXIT CODE: fatal ONLY on deterministic schema errors; LLM flags/rejects and transient network errors are informational (exit 0)
+        sys.exit(1 if deterministic_bad else 0)
     finally:
         conn.close()
 

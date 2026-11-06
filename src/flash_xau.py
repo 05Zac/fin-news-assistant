@@ -30,13 +30,109 @@ except ImportError:
         return False
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import db_path  # noqa: E402
+try:
+    from config import db_path  # noqa: E402  # python src/flash_xau.py
+    _HAS_CONFIG = True
+except ImportError:
+    from src.config import db_path  # noqa: E402  # python -m src.flash_xau
+    _HAS_CONFIG = True
+
+# --- optional live price (Finnhub) — never log key ---
+try:
+    from price import get_quote, get_history  # type: ignore  # python src/flash_xau.py
+    _HAS_PRICE = True
+except ImportError:
+    try:
+        from src.price import get_quote, get_history  # type: ignore  # python -m src.flash_xau
+        _HAS_PRICE = True
+    except Exception:
+        _HAS_PRICE = False
+        get_quote = get_history = None  # type: ignore
 
 INVESTINGLIVE_RSS = "https://www.investinglive.com/feed/"
 FF_CALENDAR_JSON = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 # Keywords that matter for XAUUSD — used to tag relevance, not to drop rows
 XAU_KEYWORDS = {"gold", "xau", "xauusd", "federal reserve", "fed", "cpi", "nfp", "nonfarm", "payroll", "fomc", "rate decision", "dxy", "dollar", "inflation", "pce", "gdp", "unemployment"}
+
+# --- live price helpers (Finnhub OANDA:XAU_USD -> GC=F fallback -> Yahoo) ---
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+def _sparkline(values: list[float]) -> str:
+    if not values or len(values) < 2:
+        return ""
+    mn, mx = min(values), max(values)
+    if mx == mn:
+        return _SPARK_CHARS[len(_SPARK_CHARS)//2] * len(values)
+    out = ""
+    for v in values:
+        idx = int((v - mn) / (mx - mn) * (len(_SPARK_CHARS)-1))
+        out += _SPARK_CHARS[idx]
+    return out
+
+def _xau_price_snapshot() -> str | None:
+    """Fetch live XAU proxy price; never raises, never logs key. Returns formatted line or None."""
+    if not _HAS_PRICE or get_quote is None:
+        return None
+    try:
+        # 1) Finnhub OANDA:XAU_USD
+        q = get_quote("OANDA:XAU_USD")  # type: ignore
+        if q and q.get("c") and q.get("c") != 0:
+            c = q["c"]
+            dp = q.get("dp")
+            try:
+                base = f"XAU ${c:,.2f}" + (f" ({dp:+.2f}%)" if dp is not None else "")
+            except Exception:
+                base = f"XAU {c}"
+            label = "Finnhub OANDA:XAU_USD"
+        else:
+            # 2) Finnhub GC=F
+            q2 = get_quote("GC=F")  # type: ignore
+            if q2 and q2.get("c") and q2.get("c") != 0:
+                c = q2["c"]
+                dp = q2.get("dp")
+                try:
+                    base = f"XAU ${c:,.2f}" + (f" ({dp:+.2f}%)" if dp is not None else "")
+                except Exception:
+                    base = f"XAU {c}"
+                label = "Finnhub GC=F (proxy)"
+            elif get_history is not None:
+                hist = get_history("GC=F", days=7)  # type: ignore
+                if hist and isinstance(hist, list) and hist and hist[0].get("error") is None:
+                    closes = [h.get("close") for h in hist if h.get("close") is not None]
+                    if closes:
+                        last = closes[-1]
+                        prev = closes[-2] if len(closes) >= 2 else None
+                        dp = ((last - prev) / prev * 100) if prev else None
+                        try:
+                            base = f"XAU ${last:,.2f}" + (f" ({dp:+.2f}%)" if dp is not None else "")
+                        except Exception:
+                            base = f"XAU {last}"
+                        label = "Yahoo GC=F (history fallback)"
+                        # sparkline context
+                        spark = _sparkline(closes[-7:])
+                        if spark:
+                            return f"{base} [{label}]  7d {spark}  closes: " + ", ".join(f"{x:,.1f}" for x in closes[-7:])
+                        return f"{base} [{label}]"
+                return None
+            else:
+                return None
+        # enrich with Yahoo 7d sparkline if cheap (non-blocking)
+        if get_history is not None:
+            try:
+                hist = get_history("GC=F", days=7)  # type: ignore
+                if hist and isinstance(hist, list) and hist and hist[0].get("error") is None:
+                    closes = [h.get("close") for h in hist if h.get("close") is not None]
+                    if closes and len(closes) >= 2:
+                        spark = _sparkline(closes[-7:])
+                        if spark:
+                            return f"{base} [{label}]  7d {spark}"
+            except Exception:
+                pass
+        return f"{base} [{label}]"
+    except Exception as e:
+        print(f"[flash_xau] XAU price snapshot failed (non-blocking): {e}", file=sys.stderr)
+        return None
 
 
 def ensure_schema(conn: sqlite3.Connection):
@@ -207,6 +303,16 @@ def main():
 
     total = sum(len(a) for _, a in all_articles)
     print(f"[flash_xau] total {total} articles/events")
+
+    # --- live XAU price snapshot (non-blocking, Finnhub) ---
+    try:
+        snap = _xau_price_snapshot()
+        if snap:
+            print(f"[flash_xau] price {snap}")
+        elif _HAS_PRICE:
+            print("[flash_xau] price (no XAU quote — offline or market closed)")
+    except Exception as e:
+        print(f"[flash_xau] price snapshot skipped (non-blocking): {e}", file=sys.stderr)
 
     if args.dry_run:
         for src, arts in all_articles:

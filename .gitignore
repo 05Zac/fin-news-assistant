@@ -2,9 +2,8 @@
 .env
 .env.local
 
-# sqlite + data (dumb store) — but keep dir structure
-data/*
-!data/.gitkeep
+# sqlite + data (dumb store)
+data/
 *.db
 *.db-wal
 *.db-shm

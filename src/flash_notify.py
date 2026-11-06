@@ -48,6 +48,18 @@ except ImportError:
 
 import os
 
+# --- optional live price (Finnhub) — never log key ---
+try:
+    from price import get_quote, get_quotes, get_history  # type: ignore  # python src/flash_notify.py
+    _HAS_PRICE = True
+except ImportError:
+    try:
+        from src.price import get_quote, get_quotes, get_history  # type: ignore  # python -m src.flash_notify
+        _HAS_PRICE = True
+    except Exception:
+        _HAS_PRICE = False
+        get_quote = get_quotes = get_history = None  # type: ignore
+
 # --- FREE-tier heuristic: HTML strip + truncate + keyword relevance ---
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -206,6 +218,150 @@ def _to_iso_timestamp(s: str) -> str | None:
     return None
 
 
+# ---------- price helpers (Finnhub live) ----------
+# Map display symbols → Finnhub query symbol
+_PRICE_DISPLAY_MAP: dict[str, str] = {
+    "XAU": "OANDA:XAU_USD",
+    "XAUUSD": "OANDA:XAU_USD",
+    "XAU_USD": "OANDA:XAU_USD",
+    "GOLD": "OANDA:XAU_USD",
+    "GC=F": "OANDA:XAU_USD",
+    "BTC": "BINANCE:BTCUSDT",
+    "BTC-USD": "BINANCE:BTCUSDT",
+    "BTCUSD": "BINANCE:BTCUSDT",
+    "BTCUSDT": "BINANCE:BTCUSDT",
+}
+
+_PRICE_REVERSE_DISPLAY: dict[str, str] = {
+    "OANDA:XAU_USD": "XAU",
+    "BINANCE:BTCUSDT": "BTC",
+}
+
+
+def _to_finnhub_symbol(sym: str) -> str:
+    raw = (sym or "").strip().upper()
+    if not raw or raw == "—":
+        return ""
+    if raw in _PRICE_DISPLAY_MAP:
+        return _PRICE_DISPLAY_MAP[raw]
+    # normalized lookup (strip - /)
+    norm = raw.replace("-", "").replace("/", "").replace("=", "")
+    if norm in _PRICE_DISPLAY_MAP:
+        return _PRICE_DISPLAY_MAP[norm]
+    return raw
+
+
+def _display_for_finnhub(fin_sym: str) -> str:
+    return _PRICE_REVERSE_DISPLAY.get(fin_sym, fin_sym)
+
+
+def _collect_symbols_for_price(kept: list[tuple]) -> list[str]:
+    """Collect unique Finnhub symbols from kept rows, capped at 5 for rate limit."""
+    seen: list[str] = []
+    for r, _, _ in kept:
+        for s in (r["symbols"] or "").split(","):
+            s = s.strip()
+            if not s or s == "—":
+                continue
+            fin = _to_finnhub_symbol(s)
+            if fin and fin not in seen:
+                seen.append(fin)
+                if len(seen) >= 5:
+                    break
+        if len(seen) >= 5:
+            break
+    return seen
+
+
+def _fetch_price_line(symbols: list[str]) -> tuple[str | None, dict]:
+    """Fetch get_quotes for symbols; returns (formatted line or None, quotes dict)."""
+    if not symbols or not _HAS_PRICE or get_quotes is None:
+        return None, {}
+    try:
+        quotes: dict = get_quotes(symbols)  # type: ignore
+        # XAU fallback: if OANDA:XAU_USD missing/zero, try GC=F then Yahoo history
+        if "OANDA:XAU_USD" in symbols:
+            q = quotes.get("OANDA:XAU_USD") or {}
+            needs_fallback = q.get("error") or not q.get("c")
+            if needs_fallback and get_quote is not None and get_history is not None:
+                try:
+                    alt = get_quote("GC=F")  # type: ignore
+                    if alt and alt.get("c") and alt.get("c") != 0:
+                        quotes["OANDA:XAU_USD"] = alt
+                    else:
+                        hist = get_history("GC=F", days=2)  # type: ignore
+                        if hist and isinstance(hist, list) and hist and hist[-1].get("close"):
+                            last = hist[-1]
+                            prev = hist[-2] if len(hist) >= 2 and hist[-2].get("close") else None
+                            c = last["close"]
+                            dp = 0.0
+                            if prev and prev.get("close"):
+                                try:
+                                    dp = (c - prev["close"]) / prev["close"] * 100
+                                except Exception:
+                                    dp = 0.0
+                            quotes["OANDA:XAU_USD"] = {"c": c, "d": c - (prev["close"] if prev else c), "dp": dp, "_fallback": "yahoo"}
+                except Exception:
+                    pass
+        parts: list[str] = []
+        for sym in symbols:
+            q = quotes.get(sym) or {}
+            if not q or q.get("error"):
+                continue
+            c = q.get("c")
+            if c is None or c == 0:
+                continue
+            dp = q.get("dp")
+            disp = _display_for_finnhub(sym)
+            try:
+                if dp is not None:
+                    parts.append(f"{disp} ${c:,.2f} ({dp:+.2f}%)")
+                else:
+                    parts.append(f"{disp} ${c:,.2f}")
+            except Exception:
+                continue
+        if not parts:
+            return None, quotes
+        return "Live: " + "  ".join(parts), quotes
+    except Exception as e:
+        print(f"[flash_notify] price fetch failed (non-blocking): {e}", file=sys.stderr)
+        return None, {}
+
+
+def _attach_price_to_embeds(embeds: list[dict], kept: list[tuple], quotes: dict) -> None:
+    """Enrich each embed with a Live Price field matching its row symbols (mutates embeds)."""
+    if not quotes:
+        return
+    for idx, (r, _, _) in enumerate(kept):
+        if idx >= len(embeds):
+            break
+        row_syms = [s.strip() for s in (r["symbols"] or "").split(",") if s.strip()]
+        fin_syms = [_to_finnhub_symbol(s) for s in row_syms]
+        lines: list[str] = []
+        for fs in fin_syms:
+            q = quotes.get(fs)
+            if not q or q.get("error") or not q.get("c"):
+                continue
+            c = q.get("c")
+            dp = q.get("dp")
+            disp = _display_for_finnhub(fs)
+            try:
+                if dp is not None:
+                    lines.append(f"{disp} ${c:,.2f} ({dp:+.2f}%)")
+                else:
+                    lines.append(f"{disp} ${c:,.2f}")
+            except Exception:
+                continue
+        if lines:
+            # append as field; keep embed size safe
+            try:
+                embeds[idx].setdefault("fields", []).append(
+                    {"name": "Live Price", "value": "  ".join(lines)[:512], "inline": False}
+                )
+            except Exception:
+                pass
+
+
 def post_discord(webhook_url: str, embeds: list[dict], content: str | None = None) -> tuple[bool, str]:
     """Post embeds to Discord webhook. Returns (ok, status_text)."""
     # Discord allows max 10 embeds per request; chunk if needed
@@ -315,6 +471,26 @@ def main():
 
         embeds = [build_embed(r, cleaned, rel) for r, cleaned, rel in kept]
 
+        # --- live price enrichment (non-blocking, Finnhub) ---
+        price_content: str | None = None
+        price_quotes: dict = {}
+        try:
+            syms = _collect_symbols_for_price(kept)
+            if syms and _HAS_PRICE:
+                line, quotes = _fetch_price_line(syms)
+                if line:
+                    price_content = line
+                    price_quotes = quotes
+                    print(f"[flash_notify] price {line}")
+                    _attach_price_to_embeds(embeds, kept, quotes)
+                else:
+                    print("[flash_notify] price (no quote data — offline or market closed)")
+            else:
+                if not _HAS_PRICE:
+                    print("[flash_notify] price module not available (offline)")
+        except Exception as e:
+            print(f"[flash_notify] price enrichment skipped (non-blocking): {e}", file=sys.stderr)
+
         # preview
         print(f"[flash_notify] preview {len(embeds)} embed(s):")
         for i, e in enumerate(embeds[:3], 1):
@@ -323,19 +499,24 @@ def main():
         if len(embeds) > 3:
             print(f"... +{len(embeds)-3} more embed(s) not shown")
 
+        if price_content:
+            print(f"[flash_notify] content price line: {price_content}")
         if args.dry_run:
             print(f"\n[flash_notify] dry-run — not posting (would post {len(embeds)} embed(s) to DISCORD_FLASH_WEBHOOK_URL len={len(webhook) if webhook else 0})")
+            if price_content:
+                print(f"[flash_notify] dry-run content would be: {price_content}")
             return
 
         if not webhook:
             print("[flash_notify] no webhook — aborting post.", file=sys.stderr)
             sys.exit(1)
 
-        # Discord: max 10 embeds per webhook call
+        # Discord: max 10 embeds per webhook call (first chunk carries price content)
         ok_all = True
         for chunk_start in range(0, len(embeds), 10):
             chunk = embeds[chunk_start: chunk_start + 10]
-            ok, status = post_discord(webhook, chunk)
+            content = price_content if chunk_start == 0 else None
+            ok, status = post_discord(webhook, chunk, content=content)
             print(f"[flash_notify] post chunk {chunk_start//10+1} size={len(chunk)} -> {status} {'ok' if ok else 'FAILED'}")
             ok_all = ok_all and ok
             if not ok:
