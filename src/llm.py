@@ -169,6 +169,63 @@ def _strip_echo(text: str, title: str) -> str:
     return out
 
 
+_ANSWER_RULE = (
+    " Think silently. Your reply must contain ONLY the final answer wrapped in "
+    "<answer></answer> tags — nothing before or after the tags."
+)
+
+_ANSWER_RE = _re.compile(r"<answer>(.*?)(?:</answer>|$)", _re.IGNORECASE | _re.DOTALL)
+_THINK_RE = _re.compile(r"<think>.*?(?:</think>|$)", _re.IGNORECASE | _re.DOTALL)
+_LEAK_RE = _re.compile(
+    r"(\bthe user\b|\blet'?s (analy|think|write|check|refine|formulate|look)|\blet me\b|"
+    r"\bwe need to\b|\bi need to\b|\bconstraints?:|\bsentence \d|^output:|^style:|^focus:)",
+    _re.IGNORECASE | _re.MULTILINE,
+)
+# Retry on a different routing profile so a reasoning-dump model isn't picked twice.
+_RETRY_MODELS = ("auto:reliable", "auto:smart")
+
+
+def _extract_answer(text: str | None, meta: dict) -> str | None:
+    """Return only the clean final answer, or None if the reply is leaked reasoning / cut off."""
+    if not text:
+        return None
+    t = _THINK_RE.sub("", text).strip()
+    m = _ANSWER_RE.search(t)
+    if m:
+        closed = "</answer>" in t.lower()
+        ans = m.group(1).strip()
+        if not closed and meta.get("finish") == "length":
+            return None  # answer itself was cut off
+    else:
+        ans = t
+    if not ans or _LEAK_RE.search(ans):
+        return None
+    if meta.get("finish") == "length" and not m:
+        return None
+    return ans
+
+
+def _guarded_chat(messages: list[dict], **kw) -> tuple[str | None, dict]:
+    """chat() + answer extraction, retrying on other routing profiles if the reply is unusable."""
+    tried = []
+    meta: dict = {}
+    for model in (None, *_RETRY_MODELS):
+        text, meta = chat(messages, model=model, **kw)
+        tried.append(meta.get("model"))
+        if meta.get("error") and not text:
+            continue
+        ans = _extract_answer(text, meta)
+        if ans:
+            meta["ok"] = True
+            meta["error"] = None
+            meta["tried"] = tried
+            return ans, meta
+        meta["error"] = "leaked_or_truncated"
+    meta["ok"] = False
+    meta["tried"] = tried
+    return None, meta
+
+
 def market_impact_note(
     title: str,
     cleaned: str,
@@ -177,7 +234,7 @@ def market_impact_note(
 ) -> tuple[str | None, dict]:
     """
     Short per-event impact note for a flash Discord embed.
-    Returns (note|None, meta). Returns None if the model says SKIP or on any failure.
+    Returns (note|None, meta). None on SKIP, leaked reasoning, or any failure.
     """
     user = f"Headline: {title}\n"
     if cleaned:
@@ -186,12 +243,12 @@ def market_impact_note(
         user += f"Tagged symbols: {symbols}\n"
     if live_price:
         user += f"Live prices: {live_price}\n"
-    text, meta = chat(
+    text, meta = _guarded_chat(
         [
-            {"role": "system", "content": _IMPACT_SYSTEM},
+            {"role": "system", "content": _IMPACT_SYSTEM + _ANSWER_RULE},
             {"role": "user", "content": user.strip()},
         ],
-        max_tokens=600,
+        max_tokens=1200,
         temperature=0.2,
     )
     if text and text.strip().upper().startswith("SKIP"):
@@ -200,7 +257,6 @@ def market_impact_note(
         return None, meta
     if text:
         text = _strip_echo(text, title)
-        # Re-check: if stripping left nothing meaningful, treat as skip
         if not text or text.upper().startswith("SKIP"):
             meta["ok"] = False
             meta["error"] = "model_skip"
@@ -212,7 +268,7 @@ _SUMMARY_SYSTEM = (
     "You are the PM analyst for a USD/XAU (gold) + macro news desk. Given a list of recent "
     "headlines and optional live prices, write a tight briefing: 3-6 bullet points covering "
     "the dominant themes, USD and gold bias, and any scheduled risk events to watch. "
-    "Plain text, no markdown headers, no preamble."
+    "Plain text bullets starting with '- ', no markdown headers, no preamble."
 )
 
 
@@ -222,12 +278,12 @@ def summarize(headlines_block: str, live_line: str | None = None) -> tuple[str |
     if live_line:
         user += f"{live_line}\n\n"
     user += f"Recent headlines:\n{headlines_block}"
-    return chat(
+    return _guarded_chat(
         [
-            {"role": "system", "content": _SUMMARY_SYSTEM},
+            {"role": "system", "content": _SUMMARY_SYSTEM + _ANSWER_RULE},
             {"role": "user", "content": user.strip()},
         ],
-        max_tokens=2000,
+        max_tokens=3000,
         temperature=0.3,
         timeout=90,
     )
