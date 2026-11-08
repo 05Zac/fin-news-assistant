@@ -205,12 +205,23 @@ def _extract_answer(text: str | None, meta: dict) -> str | None:
     return ans
 
 
-def _guarded_chat(messages: list[dict], **kw) -> tuple[str | None, dict]:
-    """chat() + answer extraction, retrying on other routing profiles if the reply is unusable."""
+def _guarded_chat(messages: list[dict], budget: float | None = None, **kw) -> tuple[str | None, dict]:
+    """chat() + answer extraction, retrying on other routing profiles if the reply is unusable.
+    budget: optional total seconds across all tries; each try's timeout is clipped to what's left."""
+    import time as _time
     tried = []
     meta: dict = {}
+    start = _time.monotonic()
+    base_timeout = kw.pop("timeout", DEFAULT_TIMEOUT)
     for model in (None, *_RETRY_MODELS):
-        text, meta = chat(messages, model=model, **kw)
+        timeout = base_timeout
+        if budget is not None:
+            left = budget - (_time.monotonic() - start)
+            if left < 5:  # not enough time for a useful try
+                meta = {**meta, "error": (meta.get("error") or "") + "|budget_exhausted"}
+                break
+            timeout = min(base_timeout, left)
+        text, meta = chat(messages, model=model, timeout=int(timeout), **kw)
         tried.append(meta.get("model"))
         if meta.get("error") and not text:
             continue
@@ -250,6 +261,8 @@ def market_impact_note(
         ],
         max_tokens=1200,
         temperature=0.2,
+        timeout=40,  # note is now added after the alert posts, so it can wait longer
+        budget=45,   # but cap all tries combined so the 30s loop is held up at most ~1 tick
     )
     if text and text.strip().upper().startswith("SKIP"):
         meta["ok"] = False

@@ -241,8 +241,9 @@ def call_agent_pm_for_event(row: sqlite3.Row, relevance: str, cleaned: str = "")
         note, meta = llm.market_impact_note(title, detail, symbols)
         if note:
             print(f"[queue_worker] free-ai note ok model={meta.get('model')} tokens={meta.get('tokens')}")
-        elif meta.get("error") not in (None, "model_skip"):
-            print(f"[queue_worker] free-ai note skipped: {meta.get('error')}")
+        else:
+            # Log every reason (incl. model_skip = AI judged it not market-relevant)
+            print(f"[queue_worker] free-ai note skipped: {meta.get('error') or 'empty'} tried={meta.get('tried')}")
         return note
     except Exception as e:
         # Never let the LLM path break the 30s loop
@@ -345,19 +346,57 @@ def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: i
 
     embed = _build_embed(rrow, cleaned, relevance)  # type: ignore
 
-    # Free-tier Event Agent note (optional; None if unavailable)
-    agent_note = call_agent_pm_for_event(rrow, relevance, cleaned)
-    if agent_note:
-        # If agent returns a note, attach as embed field or content
-        embed.setdefault("fields", []).append({"name": "Agent", "value": agent_note[:400], "inline": False})
-
-    ok, status = post_discord(webhook, [embed])  # type: ignore
+    # 1) Post the alert right away (no waiting on the AI). ?wait=true returns the message id.
+    ok, status, msg_id = _post_wait(webhook, embed)
     if not ok:
         mark_failed(conn, qid, f"discord {status}", max_attempts)
         return f"failed discord: queue id={qid} raw_id={raw_id} {status}"
+    mark_done(conn, qid)  # done now, so a slow/failed note can never cause a re-post
 
-    mark_done(conn, qid)
-    return f"done: queue id={qid} raw_id={raw_id} [{relevance}] posted {status} — {(rrow['title'] or '')[:80]}"
+    # 2) Then generate the free-tier note and edit it into the same message.
+    note_state = "no note"
+    agent_note = call_agent_pm_for_event(rrow, relevance, cleaned)
+    if agent_note and msg_id:
+        embed.setdefault("fields", []).append({"name": "Agent", "value": agent_note[:400], "inline": False})
+        pok, pstatus = _patch_message(webhook, msg_id, embed)
+        note_state = "note added" if pok else f"note edit failed {pstatus}"
+        if not pok:
+            print(f"[queue_worker] note edit failed msg={msg_id}: {pstatus}")
+    return f"done: queue id={qid} raw_id={raw_id} [{relevance}] posted {status}, {note_state} — {(rrow['title'] or '')[:80]}"
+
+
+def _webhook_url(webhook: str, suffix: str = "", query: str = "") -> str:
+    base, _, existing = webhook.partition("?")
+    url = base.rstrip("/") + suffix
+    q = "&".join(x for x in (existing, query) if x)
+    return f"{url}?{q}" if q else url
+
+
+def _post_wait(webhook: str, embed: dict) -> tuple[bool, str, str | None]:
+    """POST one embed with ?wait=true so Discord returns the created message (and its id)."""
+    import requests
+    try:
+        r = requests.post(_webhook_url(webhook, query="wait=true"), json={"embeds": [embed]}, timeout=15)
+        if r.status_code in (200, 204):
+            msg_id = None
+            try:
+                msg_id = (r.json() or {}).get("id")
+            except Exception:
+                pass
+            return True, str(r.status_code), msg_id
+        return False, f"{r.status_code} {r.text[:300]}", None
+    except Exception as e:
+        return False, str(e), None
+
+
+def _patch_message(webhook: str, msg_id: str, embed: dict) -> tuple[bool, str]:
+    """Edit a message this webhook posted (adds the AI note after the fact)."""
+    import requests
+    try:
+        r = requests.patch(_webhook_url(webhook, suffix=f"/messages/{msg_id}"), json={"embeds": [embed]}, timeout=15)
+        return r.status_code in (200, 204), str(r.status_code)
+    except Exception as e:
+        return False, str(e)
 
 
 def main():
