@@ -53,9 +53,14 @@ def fetch_marketaux(api_token: str, symbols: str = "USD,XAU", limit: int = 10) -
         "language": "en",
         "limit": limit,
     }
-    resp = requests.get(MARKETAUX_URL, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
+    # Marketaux only takes the key as a URL param, and requests puts the full URL
+    # (key included) in its error messages — scrub it so it never reaches the logs.
+    try:
+        resp = requests.get(MARKETAUX_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError(str(e).replace(api_token, "***")) from None
     # Marketaux wraps in {"data": [...], "meta": {...}}
     articles = data.get("data", []) if isinstance(data, dict) else []
     return articles
