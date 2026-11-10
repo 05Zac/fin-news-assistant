@@ -29,6 +29,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).parent))
+from prefilter import classify_relevance
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -63,17 +66,6 @@ except ImportError:
 # --- FREE-tier heuristic: HTML strip + truncate + keyword relevance ---
 TAG_RE = re.compile(r"<[^>]+>")
 
-# High = direct gold signal; Medium = macro that moves gold; Low = skip
-HIGH_KEYWORDS = {"gold", "xau", "xauusd", "xau/usd", "pboc", "peoples bank", "people's bank"}
-MEDIUM_KEYWORDS = {
-    "cpi", "fomc", "fed", "federal reserve", "powell", "pce", "nfp", "nonfarm", "payroll",
-    "rate decision", "rate hike", "rate cut", "dxy", "dollar index", "inflation",
-    "gdp", "unemployment", "jobless", "ism", "pmi", "ecb", "boj", "treasury", "yields",
-    "geopolitical", "safe haven", "safe-haven",
-}
-# combined for quick scan
-ALL_RELEVANT = HIGH_KEYWORDS | MEDIUM_KEYWORDS
-
 RELEVANCE_BADGE = {"high": "🔴 HIGH", "medium": "🟡 MEDIUM", "low": "⚪ LOW"}
 RELEVANCE_COLOR = {"high": 0xE53935, "medium": 0xFB8C00, "low": 0x78909C}
 
@@ -90,30 +82,6 @@ def clean_description(raw: str, limit: int = 300) -> str:
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text
-
-
-def classify_relevance(title: str, description: str, symbols: str = "") -> str:
-    """
-    FREE-tier classifier (heuristic). Returns high|medium|low.
-    Hook for future LLM fin-classifier: replace body with route("classify") → free-tier LLM call.
-    """
-    hay = f"{title or ''} {description or ''} {symbols or ''}".lower()
-    # hook placeholder — when fin-classifier LLM is ready:
-    #   tier = route("classify", estimate_tokens(hay))
-    #   return call_llm_classifier(hay)
-    if any(k in hay for k in HIGH_KEYWORDS):
-        return "high"
-    if any(k in hay for k in MEDIUM_KEYWORDS):
-        return "medium"
-    # also tag XAU symbol as medium at minimum if symbols explicitly XAU
-    if "xau" in (symbols or "").lower():
-        return "medium"
-    return "low"
-
-
-def classify_relevance_llm_hook(*_a, **_kw):
-    """Stub for future fin-classifier LLM integration. Keep signature stable."""
-    return None
 
 
 def get_last_flash_at(conn: sqlite3.Connection) -> str | None:
@@ -391,7 +359,7 @@ def main():
     p.add_argument("--limit", type=int, default=10, help="recent rows to consider (default 10)")
     p.add_argument("--dry-run", action="store_true", help="preview without posting")
     p.add_argument("--since", type=str, default=None, help="override since filter (ISO published_at)")
-    p.add_argument("--post-all", action="store_true", help="post even low relevance (default skips low)")
+    p.add_argument("--post-all", action="store_true", help="no-op: every article is posted now")
     p.add_argument("--include-calendar", action="store_true", help="include forexfactory/calendar rows (default excludes them; still stored in raw_events, just not posted)")
     args = p.parse_args()
 
@@ -458,9 +426,6 @@ def main():
                 pass
             cleaned = clean_description(raw_desc, limit=300)
             relevance = classify_relevance(r["title"] or "", cleaned, r["symbols"] or "")
-            if relevance == "low" and not args.post_all:
-                skipped_low += 1
-                continue
             kept.append((r, cleaned, relevance))
 
         print(f"[flash_notify] FREE-tier heuristic: kept {len(kept)} (high/medium), skipped low={skipped_low}, skipped calendar/forexfactory={skipped_calendar}")

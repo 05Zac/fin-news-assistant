@@ -126,9 +126,9 @@ def chat(
 # ---------- task helpers ----------
 
 _IMPACT_SYSTEM = (
-    "You are a terse financial-news desk analyst for a USD/XAU (gold) + macro trader. "
+    "You are a terse financial-news desk analyst for a macro trader. "
     "Given one news headline, output at most 2 sentences: the likely directional impact "
-    "on USD and gold (XAU) and why. Be concrete and non-committal where the news is vague. "
+    "on the tagged symbols (if none are tagged: on USD and gold) and why. Be concrete and non-committal where the news is vague. "
     "Start directly with the impact — do NOT restate, quote, summarize or repeat the "
     "headline or any input, and do not prefix labels like 'Headline:', 'Impact:' or "
     "'Analysis:'. No preamble, no disclaimers, no markdown. If the item is not "

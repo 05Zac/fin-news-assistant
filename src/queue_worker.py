@@ -313,11 +313,6 @@ def process_one(conn: sqlite3.Connection, dry_run: bool = False, max_attempts: i
     # Use stored relevance as source of truth for FREE gate; but compute current for logging
     current_rel = classify_relevance(rrow["title"] or "", cleaned, rrow["symbols"] or "")
 
-    if relevance == "low" or current_rel == "low":
-        # Shouldn't happen for pending, but guard token spend
-        mark_skipped(conn, qid, f"low relevance (stored={relevance} current={current_rel})")
-        return f"skipped low: queue id={qid} raw_id={raw_id} stored={relevance} current={current_rel}"
-
     # Deterministic validation
     v_errs = validate_row_deterministic(rrow)
     if v_errs:

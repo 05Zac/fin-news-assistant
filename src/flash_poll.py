@@ -39,7 +39,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import db_path
-from prefilter import prefilter_result, make_dedupe_key
+from prefilter import prefilter_result, make_dedupe_key, classify_relevance
 from store import insert_article
 
 # Reuse fetch + store helpers from flash_xau without re-importing side effects
@@ -118,7 +118,7 @@ def main():
                 pub = a.get("published_at") or ""
                 sym = ",".join(e.get("symbol") for e in (a.get("entities") or []) if isinstance(e, dict) and e.get("symbol")) or "USD"
                 # lightweight preview without DB
-                from prefilter import clean_description, classify_relevance, make_dedupe_key
+                from prefilter import clean_description  # others are imported at the top
                 cleaned = clean_description(desc, 300)
                 rel = classify_relevance(title, cleaned, sym)
                 key = make_dedupe_key(title, pub)
@@ -191,20 +191,17 @@ def main():
                 inserted += 1
 
                 # Enqueue (or skip) based on relevance
-                relevance = pf["relevance"]
+                # label from the tags entities.py just gave it (pf ran before the row existed)
+                tags = conn.execute("SELECT symbols FROM raw_events WHERE id = ?", (raw_id,)).fetchone()[0]
+                relevance = classify_relevance(title, "", tags or "")
                 dedupe_key = pf["dedupe_key"]
                 if res["is_stale"]:
                     # already old when we fetched it (e.g. after an outage): store, don't alert
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # type: ignore
                     skipped_stale += 1
-                elif pf["should_enqueue"]:
+                else:
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "pending")  # type: ignore
                     enqueued_pending += 1
-                else:
-                    # low relevance → still audit in queue as skipped so we don't re-evaluate same item
-                    # but worker will never process skipped
-                    enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # type: ignore
-                    enqueued_skipped += 1
 
         print(f"[flash_poll] done: fetched={total} inserted={inserted} pending={enqueued_pending} skipped_low={enqueued_skipped} dup_url={dup_url} dup_key_window={dup_key} dup_content={dup_content} skipped_stale={skipped_stale}")
 

@@ -5,7 +5,7 @@ Purpose: save LLM calls by dropping duplicates + LOW relevance
 before any LLM call. Used by flash_poll.py (30s RSS) and queue_worker.py.
 
 - HTML strip + truncate (~300 chars, FREE, no LLM)
-- HIGH/MEDIUM/LOW relevance via keywords (same list as flash_notify.py)
+- HIGH/MEDIUM/LOW relevance label from entity tags (a label only: LOW is still posted)
 - dedupe_key: normalized title hash + date prefix → dedup across URL variants
 - URL + dedupe_key window check against raw_events + flash_queue
 
@@ -24,16 +24,10 @@ import html
 import re
 import sqlite3
 
-# --- same keyword sets as flash_notify.py (keep in sync) ---
 TAG_RE = re.compile(r"<[^>]+>")
 
-HIGH_KEYWORDS = {"gold", "xau", "xauusd", "xau/usd", "pboc", "peoples bank", "people's bank"}
-MEDIUM_KEYWORDS = {
-    "cpi", "fomc", "fed", "federal reserve", "powell", "pce", "nfp", "nonfarm", "payroll",
-    "rate decision", "rate hike", "rate cut", "dxy", "dollar index", "inflation",
-    "gdp", "unemployment", "jobless", "ism", "pmi", "ecb", "boj", "treasury", "yields",
-    "geopolitical", "safe haven", "safe-haven",
-}
+# Zac's core desk. Anything tagged with one of these is HIGH.
+CORE_SYMBOLS = {"XAU", "USD"}
 
 
 def clean_description(raw: str, limit: int = 300) -> str:
@@ -48,14 +42,16 @@ def clean_description(raw: str, limit: int = 300) -> str:
 
 
 def classify_relevance(title: str, description: str, symbols: str = "") -> str:
-    hay = f"{title or ''} {description or ''} {symbols or ''}".lower()
-    if any(k in hay for k in HIGH_KEYWORDS):
+    """Priority label from the article's entity tags (raw_events.symbols). It no longer
+    decides whether an alert is posted: every article is.
+      high   = affects gold or the dollar
+      medium = affects another tracked asset
+      low    = no tracked asset named
+    title/description are unused; kept so callers don't change."""
+    tagged = {s.strip().upper() for s in (symbols or "").split(",") if s.strip()}
+    if tagged & CORE_SYMBOLS:
         return "high"
-    if any(k in hay for k in MEDIUM_KEYWORDS):
-        return "medium"
-    if "xau" in (symbols or "").lower():
-        return "medium"
-    return "low"
+    return "medium" if tagged else "low"
 
 
 def make_dedupe_key(title: str, published_at: str = "") -> str:
@@ -124,13 +120,13 @@ def prefilter_result(title: str, raw_description: str, url: str, published_at: s
     """
     One-call gate: clean → classify → dedupe → decision.
     Returns dict with keys: cleaned, relevance, dedupe_key, is_duplicate, dup_reason, should_enqueue
-    should_enqueue = not duplicate and relevance in (high, medium)
+    should_enqueue = not duplicate (every article is alerted, whatever its relevance)
     """
     cleaned = clean_description(raw_description, limit=300)
     relevance = classify_relevance(title, cleaned, symbols)
     dedupe_key = make_dedupe_key(title, published_at)
     is_dup, reason = is_duplicate_recent(conn, url, dedupe_key, window_minutes=15)
-    should_enqueue = (not is_dup) and relevance in ("high", "medium")
+    should_enqueue = not is_dup
     return {
         "cleaned": cleaned,
         "relevance": relevance,
