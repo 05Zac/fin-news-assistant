@@ -167,7 +167,7 @@ def fetch_raw_event(conn: sqlite3.Connection, raw_event_id: int) -> sqlite3.Row 
     conn.row_factory = sqlite3.Row
     cur = conn.execute(
         """
-        SELECT id, source, title, description, url, published_at, symbols, raw_json, created_at
+        SELECT id, source, title, description, url, published_at, symbols, topics, raw_json, created_at
         FROM raw_events WHERE id=?
         """,
         (raw_event_id,),

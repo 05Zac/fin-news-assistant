@@ -65,7 +65,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]
     cur = conn.execute(
         """
         SELECT id, source, title, description, url, published_at, symbols, created_at,
-               is_stale, via_fallback, also_seen_in
+               is_stale, via_fallback, also_seen_in, topics
         FROM raw_events
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
@@ -318,7 +318,7 @@ def main():
             except Exception:
                 pass
             headlines_block = "\n".join(
-                f"- {(r['title'] or '').strip()}" + (f" [{r['symbols']}]" if r["symbols"] else "") + _meta_tag(r)
+                f"- {(r['title'] or '').strip()}" + (f" [affects: {r['symbols']}]" if r["symbols"] else "") + (f" [topics: {r['topics']}]" if r["topics"] else "") + _meta_tag(r)
                 for r in rows[:20]
             )
             text, meta = _llm.summarize(headlines_block, live_line=live_line)

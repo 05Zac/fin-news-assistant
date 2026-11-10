@@ -32,6 +32,8 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
+import entities
+
 STALE_HOURS = float(os.getenv("STALE_HOURS", "24"))
 BODY_CHARS = 500
 
@@ -121,12 +123,15 @@ def migrate(conn: sqlite3.Connection) -> None:
     if rows:
         conn.commit()
 
+    entities.migrate(conn)
+    entities.tag_pending(conn)  # tags anything stored before tagging existed
+
 
 def insert_article(
     conn: sqlite3.Connection,
     source: str,
     article: dict,
-    default_symbols: str | None = None,
+    default_symbols: str | None = None,  # ignored since v2 #5: tags come from entities.py
     via_fallback: bool = False,
 ) -> dict:
     """Store one article unless it is a duplicate. Commits. Returns {status, id, is_stale}."""
@@ -167,10 +172,6 @@ def insert_article(
     # 3) insert
     now = datetime.now(timezone.utc)
     stale = _is_stale(published_at, now)
-    entities = article.get("entities") or []
-    symbols = (
-        ",".join(e.get("symbol") for e in entities if isinstance(e, dict) and e.get("symbol")) or default_symbols
-    )
     cur = conn.execute(
         """
         INSERT INTO raw_events
@@ -185,7 +186,7 @@ def insert_article(
             description,
             url,
             published_at,
-            symbols,
+            None,  # symbols: set by entities.tag_article below
             json.dumps(article, ensure_ascii=False),
             now.isoformat(),
             1 if via_fallback else 0,
@@ -193,5 +194,8 @@ def insert_article(
             chash,
         ),
     )
+    # What does it affect? Sets symbols (tradable) and topics from the entities table.
+    # They stay empty when nothing in the text is recognised: no placeholder tags.
+    entities.tag_article(conn, cur.lastrowid, title or "", description, commit=False)
     conn.commit()
     return {"status": "inserted", "id": cur.lastrowid, "is_stale": stale}

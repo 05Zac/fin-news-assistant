@@ -33,7 +33,8 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(res["status"], "inserted")
         r = self.row(res["id"])
         self.assertTrue(r["fetched_at"] and r["content_hash"])
-        self.assertEqual((r["via_fallback"], r["is_stale"], r["dup_count"], r["symbols"]), (0, 0, 0, "USD"))
+        self.assertEqual((r["via_fallback"], r["is_stale"], r["dup_count"]), (0, 0, 0))
+        self.assertEqual((r["symbols"], r["topics"]), ("XAU,USD", None))  # tagged from the text, no placeholder
 
     def test_same_url_is_skipped(self):
         store.insert_article(self.conn, "investinglive", art())

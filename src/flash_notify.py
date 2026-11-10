@@ -133,7 +133,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 10, since: str | None = 
         # published_at stored as ISO TEXT; string compare works for ISO8601 UTC
         cur = conn.execute(
             """
-            SELECT id, source, title, description, url, published_at, symbols, raw_json, created_at
+            SELECT id, source, title, description, url, published_at, symbols, topics, raw_json, created_at
             FROM raw_events
             WHERE published_at >= ?
             ORDER BY datetime(published_at) DESC, id DESC
@@ -147,7 +147,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 10, since: str | None = 
         # fallback to latest if since filter yields 0 (e.g. stale cursor)
     cur = conn.execute(
         """
-        SELECT id, source, title, description, url, published_at, symbols, raw_json, created_at
+        SELECT id, source, title, description, url, published_at, symbols, topics, raw_json, created_at
         FROM raw_events
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
@@ -173,13 +173,16 @@ def build_embed(row: sqlite3.Row, cleaned: str, relevance: str) -> dict:
         "color": color,
         "fields": [
             {"name": "Source", "value": source[:100], "inline": True},
-            {"name": "Symbols", "value": symbols[:50], "inline": True},
+            {"name": "Affects", "value": symbols[:50], "inline": True},
             {"name": "Relevance", "value": badge, "inline": True},
             {"name": "Published", "value": published_at[:50] or "—", "inline": True},
         ],
         "footer": {"text": "fin-news-assistant flash • FREE-tier heuristic (LLM hook ready)"},
         "timestamp": _to_iso_timestamp(published_at),
     }
+    topics = row["topics"] if "topics" in row.keys() else None
+    if topics:
+        embed["fields"].insert(2, {"name": "Topics", "value": topics[:100], "inline": True})
     if url:
         embed["url"] = url[:512]
         # also add as field for visibility if title url not rendered
