@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import db_path
 from prefilter import prefilter_result, make_dedupe_key
+from store import insert_article
 
 # Reuse fetch + store helpers from flash_xau without re-importing side effects
 # We import fetch_investinglive and store_raw directly
@@ -150,6 +151,8 @@ def main():
         enqueued_skipped = 0
         dup_url = 0
         dup_key = 0
+        dup_content = 0
+        skipped_stale = 0
 
         for src, arts in all_articles:
             for a in arts:
@@ -169,23 +172,15 @@ def main():
                         dup_key += 1
                     continue
 
-                # Not duplicate — store to raw_events
-                # Use store_raw per-article to get inserted id
-                raw_json = json.dumps(a, ensure_ascii=False)
-                external_id = str(a.get("uuid") or a.get("id") or "")
-                # Double-check url still not inserted by race (store_raw also checks)
-                if url:
-                    cur = conn.execute("SELECT 1 FROM raw_events WHERE url = ? LIMIT 1", (url,))
-                    if cur.fetchone():
-                        dup_url += 1
-                        continue
-
-                cur = conn.execute(
-                    "INSERT INTO raw_events (source, external_id, title, description, url, published_at, symbols, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (src, external_id, title, description, url, published_at, symbols, raw_json),
-                )
-                raw_id = cur.lastrowid
-                conn.commit()
+                # Not a recent duplicate — store (URL + content dedup happen in store.py)
+                res = insert_article(conn, src, a, default_symbols="USD")
+                if res["status"] == "url_exists":
+                    dup_url += 1
+                    continue
+                if res["status"] == "content_dup":
+                    dup_content += 1  # same story already stored (other source or new URL)
+                    continue
+                raw_id = res["id"]
 
                 # Update ingest cursor
                 conn.execute(
@@ -198,7 +193,11 @@ def main():
                 # Enqueue (or skip) based on relevance
                 relevance = pf["relevance"]
                 dedupe_key = pf["dedupe_key"]
-                if pf["should_enqueue"]:
+                if res["is_stale"]:
+                    # already old when we fetched it (e.g. after an outage): store, don't alert
+                    enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # type: ignore
+                    skipped_stale += 1
+                elif pf["should_enqueue"]:
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "pending")  # type: ignore
                     enqueued_pending += 1
                 else:
@@ -207,7 +206,7 @@ def main():
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # type: ignore
                     enqueued_skipped += 1
 
-        print(f"[flash_poll] done: fetched={total} inserted={inserted} pending={enqueued_pending} skipped_low={enqueued_skipped} dup_url={dup_url} dup_key_window={dup_key}")
+        print(f"[flash_poll] done: fetched={total} inserted={inserted} pending={enqueued_pending} skipped_low={enqueued_skipped} dup_url={dup_url} dup_key_window={dup_key} dup_content={dup_content} skipped_stale={skipped_stale}")
 
         # Quick queue depth for monitoring
         try:

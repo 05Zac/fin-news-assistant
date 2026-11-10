@@ -37,6 +37,8 @@ except ImportError:
     from src.config import db_path  # noqa: E402  # python -m src.flash_xau
     _HAS_CONFIG = True
 
+from store import insert_article, migrate  # noqa: E402
+
 # --- optional live price (Finnhub) — never log key ---
 try:
     from price import get_quote, get_history  # type: ignore  # python src/flash_xau.py
@@ -142,6 +144,7 @@ def ensure_schema(conn: sqlite3.Connection):
     if schema_file.exists():
         conn.executescript(schema_file.read_text())
     conn.commit()
+    migrate(conn)
 
 
 def is_feature_active(conn: sqlite3.Connection) -> bool:
@@ -246,26 +249,11 @@ def fetch_ff_calendar(limit: int = 20) -> list[dict]:
 
 
 def store_raw(conn: sqlite3.Connection, articles: list[dict], source: str) -> int:
+    """Store articles through store.insert_article (URL + content dedup, row metadata)."""
     inserted = 0
     for a in articles:
-        external_id = str(a.get("uuid") or a.get("id") or "")
-        title = a.get("title")
-        description = a.get("description") or a.get("snippet") or ""
-        url = a.get("url")
-        published_at = a.get("published_at") or ""
-        entities = a.get("entities") or []
-        symbols = ",".join(e.get("symbol") for e in entities if isinstance(e, dict) and e.get("symbol")) or "USD"
-        raw_json = json.dumps(a, ensure_ascii=False)
-        if url:
-            cur = conn.execute("SELECT 1 FROM raw_events WHERE url = ? LIMIT 1", (url,))
-            if cur.fetchone():
-                continue
-        conn.execute(
-            "INSERT INTO raw_events (source, external_id, title, description, url, published_at, symbols, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (source, external_id, title, description, url, published_at, symbols, raw_json),
-        )
-        inserted += 1
-    conn.commit()
+        if insert_article(conn, source, a, default_symbols="USD")["status"] == "inserted":
+            inserted += 1
     if inserted:
         conn.execute(
             "INSERT INTO status(key, value) VALUES ('last_ingest_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",

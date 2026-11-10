@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import db_path
 from prefilter import clean_description, classify_relevance
+from store import migrate
 
 # FREE-tier LLM (FreeLLMAPI). Optional — falls back to None on any issue.
 try:
@@ -79,6 +80,7 @@ def ensure_schema(conn: sqlite3.Connection):
     if schema_file.exists():
         conn.executescript(schema_file.read_text())
         conn.commit()
+    migrate(conn)
 
 
 STALE_PROCESSING_MINUTES = 5  # a single item normally finishes in well under a minute

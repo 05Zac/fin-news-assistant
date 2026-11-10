@@ -5,7 +5,8 @@ PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA foreign_keys=ON;
 
--- 1) raw_events: dumb store for Marketaux (and later GDELT) raw payloads
+-- 1) raw_events: every fetched article. v2 metadata columns (fetched_at, via_fallback, is_stale,
+--    content_hash, dup_count, also_seen_in) are added by src/store.py migrate().
 CREATE TABLE IF NOT EXISTS raw_events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     source       TEXT NOT NULL DEFAULT 'marketaux', -- marketaux | gdelt | forexfactory

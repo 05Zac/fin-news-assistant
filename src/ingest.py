@@ -27,6 +27,7 @@ except ImportError:
         return False
 
 from config import db_path, marketaux_token
+from store import insert_article, migrate
 
 MARKETAUX_URL = "https://api.marketaux.com/v1/news/all"
 
@@ -42,6 +43,7 @@ def ensure_schema(conn: sqlite3.Connection):
     if schema_file.exists():
         conn.executescript(schema_file.read_text())
     conn.commit()
+    migrate(conn)
 
 
 def fetch_marketaux(api_token: str, symbols: str = "USD,XAU", limit: int = 10) -> list[dict]:
@@ -67,37 +69,11 @@ def fetch_marketaux(api_token: str, symbols: str = "USD,XAU", limit: int = 10) -
 
 
 def store_raw(conn: sqlite3.Connection, articles: list[dict], source: str = "marketaux") -> int:
-    """Dumb store: insert each article as raw_json TEXT. No dedup logic beyond URL ignore."""
+    """Store articles through store.insert_article (URL + content dedup, row metadata)."""
     inserted = 0
     for a in articles:
-        external_id = str(a.get("uuid") or a.get("id") or "")
-        title = a.get("title")
-        description = a.get("description") or a.get("snippet") or a.get("highlight")
-        url = a.get("url")
-        published_at = a.get("published_at") or a.get("published_at") or ""
-        # symbols as comma string
-        entities = a.get("entities") or []
-        symbols = ",".join(
-            e.get("symbol") for e in entities if isinstance(e, dict) and e.get("symbol")
-        ) or None
-        raw_json = json.dumps(a, ensure_ascii=False)
-
-        # minimal dedup: skip if same url already stored today (keeps stub simple)
-        if url:
-            cur = conn.execute("SELECT 1 FROM raw_events WHERE url = ? LIMIT 1", (url,))
-            if cur.fetchone():
-                continue
-
-        conn.execute(
-            """
-            INSERT INTO raw_events (source, external_id, title, description, url, published_at, symbols, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (source, external_id, title, description, url, published_at, symbols, raw_json),
-        )
-        inserted += 1
-    conn.commit()
-    # update status cursor
+        if insert_article(conn, source, a)["status"] == "inserted":
+            inserted += 1
     conn.execute(
         "INSERT INTO status(key, value) VALUES ('last_ingest_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
         (datetime.now(timezone.utc).isoformat(),),

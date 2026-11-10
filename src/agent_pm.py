@@ -27,9 +27,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import db_path, discord_webhook, estimate_tokens, route, FREE  # noqa: E402  # python src/agent_pm.py
+    from store import migrate  # noqa: E402
     _HAS_CONFIG = True
 except ImportError:
     from src.config import db_path, discord_webhook, estimate_tokens, route, FREE  # noqa: E402  # python -m src.agent_pm
+    from src.store import migrate  # noqa: E402
     _HAS_CONFIG = True
 
 # --- optional live price (Finnhub) — never log key ---
@@ -45,11 +47,25 @@ except ImportError:
         get_quote = get_quotes = get_history = None  # type: ignore  # noqa: F811
 
 
+def _meta_tag(r: sqlite3.Row) -> str:
+    """Short provenance marker for the digest: old at fetch time, backup source, also carried elsewhere."""
+    tags = []
+    if r["is_stale"]:
+        tags.append("old")
+    if r["via_fallback"]:
+        tags.append(f"backup source: {r['source']}")
+    if r["also_seen_in"]:
+        tags.append(f"also in {r['also_seen_in']}")
+    return f" ({'; '.join(tags)})" if tags else ""
+
+
 def fetch_recent(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    migrate(conn)  # make sure the v2 metadata columns exist
     conn.row_factory = sqlite3.Row
     cur = conn.execute(
         """
-        SELECT id, source, title, description, url, published_at, symbols, created_at
+        SELECT id, source, title, description, url, published_at, symbols, created_at,
+               is_stale, via_fallback, also_seen_in
         FROM raw_events
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
@@ -221,7 +237,7 @@ def build_stub_summary(rows: list[sqlite3.Row]) -> str:
     ])
     for r in rows[:10]:
         sym = f" [{r['symbols']}]" if r["symbols"] else ""
-        lines.append(f"- {r['title'] or '(no title)'}{sym} — {r['url'] or 'no url'}")
+        lines.append(f"- {r['title'] or '(no title)'}{sym}{_meta_tag(r)} — {r['url'] or 'no url'}")
     if total > 10:
         lines.append(f"... +{total - 10} more in DB (not shown)")
 
@@ -302,7 +318,7 @@ def main():
             except Exception:
                 pass
             headlines_block = "\n".join(
-                f"- {(r['title'] or '').strip()}" + (f" [{r['symbols']}]" if r["symbols"] else "")
+                f"- {(r['title'] or '').strip()}" + (f" [{r['symbols']}]" if r["symbols"] else "") + _meta_tag(r)
                 for r in rows[:20]
             )
             text, meta = _llm.summarize(headlines_block, live_line=live_line)
