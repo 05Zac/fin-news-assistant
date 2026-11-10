@@ -61,6 +61,34 @@ class EntitiesTest(unittest.TestCase):
         self.conn.execute("INSERT INTO entities (code, kind, name, aliases) VALUES ('SGD','currency','Singapore dollar','SGD|Singapore dollar')")
         self.assertEqual(self.tags("Singapore dollar firms after MAS decision")[0], "SGD")
 
+    def test_sector_fans_out_to_its_tickers(self):
+        self.assertEqual(self.tags("Microchip prices rise 12% as demand outstrips supply"),
+                         ("NVDA,AMD,INTC,TSM,MU,AVGO", "Semiconductors"))
+        # a bank giving its view is not news about the bank
+        self.assertEqual(self.tags("Goldman sees oil majors lagging")[0], "WTI,XOM,CVX")
+
+    def test_ai_fallback_only_accepts_known_codes(self):
+        ids = [store.insert_article(self.conn, "investinglive", {
+            "title": t, "description": "", "url": f"https://a.example/{i}",
+            "published_at": "2026-11-10T03:00:00+00:00"})["id"]
+            for i, t in enumerate(["Drugmaker raises guidance", "Broker wins award", "Quiet session"])]
+        asked = []
+
+        def fake_chat(messages):
+            asked.append(messages[1]["content"])
+            # newest article is line 1; FAKE is not an entity and must be dropped
+            return "1: NONE\n2: none\n3: SPX, FAKE"
+
+        self.assertEqual(entities.llm_tag_untagged(self.conn, chat=fake_chat), 3)
+        got = dict(self.conn.execute("SELECT id, symbols FROM raw_events"))
+        self.assertEqual([got[i] for i in ids], ["SPX", None, None])
+        self.assertEqual(self.conn.execute("SELECT topics FROM raw_events WHERE id=?", (ids[1],)).fetchone()[0], "No market impact")
+        # answered articles are not asked about again, and the AI tags survive a re-tag
+        self.assertEqual(entities.llm_tag_untagged(self.conn, chat=fake_chat), 0)
+        self.assertEqual(len(asked), 1)
+        entities.tag_pending(self.conn, retag_all=True)
+        self.assertEqual(self.conn.execute("SELECT symbols FROM raw_events WHERE id=?", (ids[0],)).fetchone()[0], "SPX")
+
 
 if __name__ == "__main__":
     unittest.main()

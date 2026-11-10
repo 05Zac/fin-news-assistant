@@ -7,4 +7,4 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/home/user/.openclaw/workspace-gpt/fin-news-assistant
 EnvironmentFile=/home/user/.openclaw/workspace-gpt/fin-news-assistant/.env
-ExecStart=/bin/bash -c 'python3 src/backup_db.py --keep 14; python3 src/flash_xau.py --limit 15; python3 src/ingest.py --limit 10 --symbols USD,XAU; python3 src/resolver.py --limit 50; python3 src/flash_notify.py --limit 10; python3 src/agent_pm.py --limit 50 --post-discord; python3 src/validate.py --limit 50'
+ExecStart=/bin/bash -c 'python3 src/backup_db.py --keep 14; python3 src/flash_xau.py --limit 15; python3 src/ingest.py --limit 10 --symbols USD,XAU; python3 src/resolver.py --limit 50; python3 src/flash_notify.py --limit 10; python3 src/agent_pm.py --limit 50 --post-discord; python3 src/entities.py --llm-untagged 60; python3 src/validate.py --limit 50'
