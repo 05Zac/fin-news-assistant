@@ -5,7 +5,7 @@ Reads recent raw_events (limit 10, where published_at >= last check or just late
 FREE-tier heuristic cleanup (strip HTML, truncate ~300 chars), classifies relevance
 high/medium/low for XAU/USD via keywords gold/XAU/CPI/FOMC/PBOC/etc, skips low,
 then formats readable Discord webhook embed (title, cleaned description, source,
-published_at, url, symbol tags, relevance badge).
+published_at, url, ticker and topic tags).
 
 Env: DISCORD_FLASH_WEBHOOK_URL (second webhook, flash), DB_PATH
 Usage:
@@ -66,8 +66,7 @@ except ImportError:
 # --- FREE-tier heuristic: HTML strip + truncate + keyword relevance ---
 TAG_RE = re.compile(r"<[^>]+>")
 
-RELEVANCE_BADGE = {"high": "🔴 HIGH", "medium": "🟡 MEDIUM", "low": "⚪ LOW"}
-RELEVANCE_COLOR = {"high": 0xE53935, "medium": 0xFB8C00, "low": 0x78909C}
+EMBED_COLOR = 0x78909C
 
 
 def clean_description(raw: str, limit: int = 300) -> str:
@@ -125,24 +124,22 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 10, since: str | None = 
     return cur.fetchall()
 
 
-def build_embed(row: sqlite3.Row, cleaned: str, relevance: str) -> dict:
+def build_embed(row: sqlite3.Row, cleaned: str, relevance: str = "") -> dict:
+    # relevance is no longer shown (every article posts; the tickers say what it is about)
     title = (row["title"] or "(no title)").strip()[:256]
     url = sanitize_url((row["url"] or "").strip())
     source = row["source"] or "unknown"
     published_at = row["published_at"] or row["created_at"] or ""
     symbols = row["symbols"] or "—"
-    badge = RELEVANCE_BADGE.get(relevance, relevance)
-    color = RELEVANCE_COLOR.get(relevance, 0x78909C)
 
     # Discord embed: title + description + fields
     embed = {
-        "title": f"{badge} {title}"[:256],
+        "title": title,
         "description": cleaned[:300] if cleaned else "_no description_",
-        "color": color,
+        "color": EMBED_COLOR,
         "fields": [
             {"name": "Source", "value": source[:100], "inline": True},
             {"name": "Affects", "value": symbols[:50], "inline": True},
-            {"name": "Relevance", "value": badge, "inline": True},
             {"name": "Published", "value": published_at[:50] or "—", "inline": True},
         ],
         "footer": {"text": "fin-news-assistant flash • FREE-tier heuristic (LLM hook ready)"},
