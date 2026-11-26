@@ -1,7 +1,7 @@
 """
 flash_poll.py — Lean 30s InvestingLive poller → prefilter → DB → queue (enqueue-only).
 
-Called every 30s by n8n (or systemd). Does NOT post to Discord directly.
+Called every 30s by the fin-flash systemd timer. Does NOT post to Discord directly.
 The queue_worker.py drains the queue (one-by-one) and posts.
 
 Flow:

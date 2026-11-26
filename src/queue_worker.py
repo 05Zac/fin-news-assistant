@@ -108,7 +108,7 @@ def reclaim_stale(conn: sqlite3.Connection, minutes: int = STALE_PROCESSING_MINU
 def dequeue_one(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """
     Atomically claim the oldest 'pending' row.
-    Uses BEGIN IMMEDIATE to serialize workers (flock also guards n8n overlap).
+    Uses BEGIN IMMEDIATE to serialize workers (flock also guards timer overlap).
     Returns the claimed row or None if nothing pending or another worker holds 'processing'.
     """
     # Recover rows stuck in 'processing' (worker crashed/killed mid-item). Without this a
