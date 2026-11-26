@@ -1,0 +1,9 @@
+[Unit]
+Description=Every 10 min — Fin News official feeds (Fed, ECB press)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

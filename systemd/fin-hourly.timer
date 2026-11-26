@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly — Fin News GDELT, SEC 8-Ks, ECB rate
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

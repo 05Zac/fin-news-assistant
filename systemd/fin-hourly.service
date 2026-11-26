@@ -1,0 +1,11 @@
+[Unit]
+Description=Fin News — hourly sources (GDELT search, SEC 8-Ks, ECB EUR/USD rate)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/.openclaw/workspace-gpt/fin-news-assistant
+EnvironmentFile=/home/user/.openclaw/workspace-gpt/fin-news-assistant/.env
+TimeoutStartSec=15min
+ExecStart=/bin/bash -c 'flock -n /tmp/fin-hourly.lock bash -c "python3 src/flash_poll.py --source gdelt --limit 250 --enqueue-only; python3 src/flash_poll.py --source sec --enqueue-only; python3 src/flash_poll.py --source ecb_fx --limit 5 --enqueue-only"'

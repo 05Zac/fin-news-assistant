@@ -67,6 +67,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]
         SELECT id, source, title, description, url, published_at, symbols, created_at,
                is_stale, via_fallback, also_seen_in, topics
         FROM raw_events
+        WHERE source != 'gdelt'  -- search-only source, see sources.SEARCH_ONLY
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
         """,

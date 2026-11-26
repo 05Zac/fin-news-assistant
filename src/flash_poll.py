@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import db_path
 from prefilter import prefilter_result, make_dedupe_key, classify_relevance
 from store import insert_article
+import sources
 
 # Reuse fetch + store helpers from flash_xau without re-importing side effects
 # We import fetch_investinglive and store_raw directly
@@ -69,8 +70,8 @@ def main():
     load_dotenv()
     p = argparse.ArgumentParser(description="30s flash poll → prefilter → queue (enqueue-only, FREE)")
     p.add_argument("--limit", type=int, default=15)
-    p.add_argument("--source", choices=["investinglive", "forexfactory", "all"], default="investinglive",
-                   help="30s loop should be investinglive only (default)")
+    p.add_argument("--source", choices=["investinglive", "forexfactory", "all", *sources.FETCHERS], default="investinglive",
+                   help="30s loop: investinglive (default). fed / gdelt run on their own timers")
     p.add_argument("--dry-run", action="store_true", help="fetch + prefilter preview, no DB write")
     p.add_argument("--enqueue-only", action="store_true", help="enqueue high/medium to pending, low to skipped (no direct Discord)")
     p.add_argument("--window-minutes", type=int, default=15, help="dedupe_key window in minutes (default 15)")
@@ -99,8 +100,9 @@ def main():
         except Exception as e:
             print(f"[flash_poll] forexfactory failed: {e}", file=sys.stderr)
 
-    total = sum(len(a) for _, a in all_articles)
-    print(f"[flash_poll] total {total} fetched")
+    if args.dry_run and args.source in sources.FETCHERS:
+        dconn = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)  # sec needs the entity list
+        all_articles.append((args.source, sources.FETCHERS[args.source](args.limit, dconn)))
 
     if args.dry_run:
         # Preview prefilter without DB
@@ -145,6 +147,15 @@ def main():
             print("[flash_poll] feature_flag=read_only — skipping store/enqueue.")
             return
 
+        if args.source in sources.FETCHERS:
+            arts = sources.fetch_with_cooloff(conn, args.source, args.limit)
+            if arts is None:
+                return
+            print(f"[flash_poll] {args.source} fetched {len(arts)}")
+            all_articles.append((args.source, arts))
+        total = sum(len(a) for _, a in all_articles)
+        print(f"[flash_poll] total {total} fetched")
+
         # Stats
         inserted = 0
         enqueued_pending = 0
@@ -153,6 +164,7 @@ def main():
         dup_key = 0
         dup_content = 0
         skipped_stale = 0
+        skipped_search_only = 0
 
         for src, arts in all_articles:
             for a in arts:
@@ -173,7 +185,7 @@ def main():
                     continue
 
                 # Not a recent duplicate — store (URL + content dedup happen in store.py)
-                res = insert_article(conn, src, a, default_symbols="USD")
+                res = insert_article(conn, src, a, via_fallback=src in sources.SEARCH_ONLY)
                 if res["status"] == "url_exists":
                     dup_url += 1
                     continue
@@ -195,7 +207,10 @@ def main():
                 tags = conn.execute("SELECT symbols FROM raw_events WHERE id = ?", (raw_id,)).fetchone()[0]
                 relevance = classify_relevance(title, "", tags or "")
                 dedupe_key = pf["dedupe_key"]
-                if res["is_stale"]:
+                if src in sources.SEARCH_ONLY:
+                    enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # stored for search, not alerted
+                    skipped_search_only += 1
+                elif res["is_stale"]:
                     # already old when we fetched it (e.g. after an outage): store, don't alert
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "skipped")  # type: ignore
                     skipped_stale += 1
@@ -203,7 +218,7 @@ def main():
                     enqueue(conn, int(raw_id), dedupe_key, relevance, "pending")  # type: ignore
                     enqueued_pending += 1
 
-        print(f"[flash_poll] done: fetched={total} inserted={inserted} pending={enqueued_pending} skipped_low={enqueued_skipped} dup_url={dup_url} dup_key_window={dup_key} dup_content={dup_content} skipped_stale={skipped_stale}")
+        print(f"[flash_poll] done: fetched={total} inserted={inserted} pending={enqueued_pending} skipped_low={enqueued_skipped} dup_url={dup_url} dup_key_window={dup_key} dup_content={dup_content} skipped_stale={skipped_stale} search_only={skipped_search_only}")
 
         # Quick queue depth for monitoring
         try:

@@ -116,7 +116,7 @@ SEED = [
     ("EQUITIES", "theme", "Equities", "stocks|equities|stock market|Wall Street|indices|risk-off|risk-on|risk appetite", "SPX,NDX"),
     ("CRYPTO", "theme", "Crypto", "crypto|cryptocurrency|cryptocurrencies|stablecoin|stablecoins|altcoin|altcoins|Binance|Tether|USDT", "BTC,ETH"),
     # central banks -> their currency (Fed also gold)
-    ("FED", "central_bank", "Federal Reserve", "=Fed|FOMC|Federal Reserve|Powell|fed funds", "USD,XAU"),
+    ("FED", "central_bank", "Federal Reserve", "=Fed|FOMC|Federal Reserve|Federal Open Market Committee|Powell|fed funds", "USD,XAU"),
     ("ECB", "central_bank", "European Central Bank", "ECB|European Central Bank|Lagarde", "EUR"),
     ("BOJ", "central_bank", "Bank of Japan", "BOJ|BoJ|Bank of Japan|Ueda", "JPY"),
     ("BOE", "central_bank", "Bank of England", "BOE|BoE|Bank of England|Bailey", "GBP"),
