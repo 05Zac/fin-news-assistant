@@ -405,7 +405,7 @@ def main():
             # --today must not be starved by future-dated calendar rows (e.g. 2026-10-14) when ordered by published_at DESC.
             # Fetch generously, then filter to today KL. Fallback to id DESC window if published_at ordering misses today.
             cur = conn.execute(
-                "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source != 'gdelt' ORDER BY published_at DESC, id DESC LIMIT ?",
+                "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source NOT IN ('gdelt', 'ecb_fx') ORDER BY published_at DESC, id DESC LIMIT ?",
                 (max(args.limit * 8, 100),),
             )
             all_rows = cur.fetchall()
@@ -413,7 +413,7 @@ def main():
             if not rows:
                 # fallback: last 200 by insertion order may contain today's non-calendar news
                 cur2 = conn.execute(
-                    "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source != 'gdelt' ORDER BY id DESC LIMIT 200"
+                    "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source NOT IN ('gdelt', 'ecb_fx') ORDER BY id DESC LIMIT 200"
                 )
                 alt = cur2.fetchall()
                 rows = [r for r in alt if _kl_date(r["published_at"]) == today][: args.limit]
@@ -429,7 +429,7 @@ def main():
             print(f"[validate] today KL {today}: analyst summaries {len(analyst_rows)}, raw_events today {len(rows)}/{len(all_rows)} recent")
         else:
             cur = conn.execute(
-                "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source != 'gdelt' ORDER BY id DESC LIMIT ?",
+                "SELECT id, title, description, published_at, url, symbols, raw_json FROM raw_events WHERE source NOT IN ('gdelt', 'ecb_fx') ORDER BY id DESC LIMIT ?",
                 (args.limit,),
             )
             rows = cur.fetchall()

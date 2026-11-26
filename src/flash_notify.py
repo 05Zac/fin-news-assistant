@@ -102,7 +102,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 10, since: str | None = 
             """
             SELECT id, source, title, description, url, published_at, symbols, topics, raw_json, created_at
             FROM raw_events
-            WHERE source != 'gdelt' AND published_at >= ?
+            WHERE source NOT IN ('gdelt', 'ecb_fx') AND published_at >= ?
             ORDER BY datetime(published_at) DESC, id DESC
             LIMIT ?
             """,
@@ -116,7 +116,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 10, since: str | None = 
         """
         SELECT id, source, title, description, url, published_at, symbols, topics, raw_json, created_at
         FROM raw_events
-        WHERE source != 'gdelt'
+        WHERE source NOT IN ('gdelt', 'ecb_fx')
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
         """,

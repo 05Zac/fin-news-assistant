@@ -43,6 +43,7 @@ GDELT_TRIES = 4
 GDELT_GAP_S = 15
 
 # Sources that are stored for search only: no Discord alert, not in digest/verifier.
+# Keep in sync with the `source NOT IN (...)` filters in agent_pm, flash_notify, resolver, validate.
 SEARCH_ONLY = {"gdelt", "ecb_fx"}
 COOLOFF_MIN = {"fed": 30, "ecb": 30, "ecb_fx": 120, "gdelt": 50, "sec": 120}  # gdelt < 1h so the next hourly run still tries
 

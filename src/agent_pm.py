@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import re
 import sqlite3
 import sys
 from collections import Counter
@@ -67,7 +68,7 @@ def fetch_recent(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]
         SELECT id, source, title, description, url, published_at, symbols, created_at,
                is_stale, via_fallback, also_seen_in, topics
         FROM raw_events
-        WHERE source != 'gdelt'  -- search-only source, see sources.SEARCH_ONLY
+        WHERE source NOT IN ('gdelt', 'ecb_fx')  -- search-only source, see sources.SEARCH_ONLY
         ORDER BY datetime(published_at) DESC, id DESC
         LIMIT ?
         """,
@@ -199,61 +200,71 @@ def _build_price_section(rows: list[sqlite3.Row]) -> str | None:
     return _pm_price_snapshot(rows)
 
 
-def build_stub_summary(rows: list[sqlite3.Row]) -> str:
-    """Deterministic stub so v1 works without LLM keys. Replace body with LLM later."""
-    if not rows:
-        return "No events in DB yet — run ingest first."
+DISCORD_LIMIT = 2000
+MAX_POINTS = 6
+TOP_HEADLINES = 8
+_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022\u2013]|\d+[.)])\s+(.*\S)")
+_MD_RE = re.compile(r"\*\*|__|^#+\s*")
 
-    total = len(rows)
-    sources = Counter(r["source"] for r in rows)
-    symbols = Counter()
-    for r in rows:
-        if r["symbols"]:
-            for s in r["symbols"].split(","):
-                s = s.strip()
-                if s:
-                    symbols[s] += 1
 
-    latest = rows[0]
-    oldest = rows[-1]
+def clean_points(text: str | None) -> list[str]:
+    """The AI's bullets, whatever style the model used, as plain '- ' lines (max MAX_POINTS)."""
+    points = []
+    for line in (text or "").splitlines():
+        m = _BULLET_RE.match(line)
+        if not m:
+            continue
+        point = _MD_RE.sub("", m.group(1)).strip()
+        if point and not point.lower().startswith("live:"):
+            points.append(point)
+    return points[:MAX_POINTS]
 
-    # non-blocking live price — extra section, stub stays deterministic without it
-    live_line: str | None = None
-    try:
-        live_line = _pm_price_snapshot(rows)
-    except Exception:
-        live_line = None
 
-    lines: list[str] = [
-        f"Fin News PM Summary — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-    ]
+def build_summary(rows: list[sqlite3.Row], points: list[str], live_line: str | None,
+                  now: datetime | None = None) -> str:
+    """Daily briefing. Same layout every day; only 'Key points' depends on the AI."""
+    now = now or datetime.now(timezone.utc)
+    lines = [f"**Daily briefing \u2014 {now.strftime('%a %d %b %Y')}**"]
     if live_line:
         lines.append(live_line)
-    lines.extend([
-        f"Scope: last {total} events (LIMIT 50, dumb store)",
-        f"Sources: {dict(sources)} | Symbols: {dict(symbols) if symbols else 'n/a'}",
-        f"Window: {oldest['published_at'] or oldest['created_at']} → {latest['published_at'] or latest['created_at']}",
-        "",
-        "Top headlines:",
-    ])
-    for r in rows[:10]:
-        sym = f" [{r['symbols']}]" if r["symbols"] else ""
-        lines.append(f"- {r['title'] or '(no title)'}{sym}{_meta_tag(r)} — {r['url'] or 'no url'}")
-    if total > 10:
-        lines.append(f"... +{total - 10} more in DB (not shown)")
-
-    lines += [
-        "",
-        "Next: Evidence Bundle → Fact Extraction → Validation → Discord (full pipeline v1).",
-        "Note: deterministic stub (free-tier AI was unavailable for this run).",
-    ]
+    lines += ["", "**Key points**"]
+    lines += [f"- {p}" for p in points] or ["_AI summary unavailable today \u2014 see the headlines below._"]
+    lines += ["", "**Top headlines**"]
+    for r in rows[:TOP_HEADLINES]:
+        title = (r["title"] or "(no title)").strip().replace("[", "(").replace("]", ")")
+        title = f"[{title}](<{r['url']}>)" if r["url"] else title
+        tags = f" `{r['symbols'].replace(',', ', ')}`" if r["symbols"] else ""
+        lines.append(f"- {title}{tags}{_meta_tag(r)}")
+    if len(rows) > TOP_HEADLINES:
+        lines.append(f"_+{len(rows) - TOP_HEADLINES} more in the last {len(rows)} articles_")
     return "\n".join(lines)
+
+
+def split_message(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
+    """Split on line breaks so no message is cut mid-line (Discord rejects > 2000 chars)."""
+    lines = []
+    for line in text.splitlines():
+        lines += [line[i : i + limit] for i in range(0, len(line), limit)] or [""]  # only a >2000-char line is cut
+    parts, cur = [], ""
+    for line in lines:
+        cand = f"{cur}\n{line}" if cur else line
+        if len(cand) > limit:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = cand
+    parts.append(cur)
+    return [p for p in parts if p.strip()]
 
 
 def post_discord(webhook_url: str, text: str) -> bool:
     try:
-        r = requests.post(webhook_url, json={"content": text[:1900]}, timeout=10)
-        return r.status_code in (200, 204)
+        for part in split_message(text):
+            r = requests.post(webhook_url, json={"content": part, "allowed_mentions": {"parse": []}}, timeout=10)
+            if r.status_code not in (200, 204):
+                print(f"[agent_pm] discord post http {r.status_code}: {r.text[:200]}")
+                return False
+        return True
     except Exception as e:
         print(f"[agent_pm] discord post failed: {e}")
         return False
@@ -312,12 +323,12 @@ def main():
                 from src import llm as _llm  # type: ignore
             except ImportError:
                 _llm = None  # type: ignore
+        live_line = None
+        try:
+            live_line = _pm_price_snapshot(rows)
+        except Exception as e:
+            print(f"[agent_pm] price snapshot skipped (non-blocking): {e}", file=sys.stderr)
         if _llm is not None and _llm.available():
-            live_line = None
-            try:
-                live_line = _pm_price_snapshot(rows)
-            except Exception:
-                pass
             headlines_block = "\n".join(
                 f"- {(r['title'] or '').strip()}" + (f" [affects: {r['symbols']}]" if r["symbols"] else "") + (f" [topics: {r['topics']}]" if r["topics"] else "") + _meta_tag(r)
                 for r in rows[:20]
@@ -335,17 +346,13 @@ def main():
                 print(f"[agent_pm] free-ai summary unavailable ({meta.get('error')}) — using deterministic stub")
         else:
             print("[agent_pm] FREE_API_KEY not set — using deterministic stub")
-        summary = llm_text.strip() if llm_text else build_stub_summary(rows)
-        # ensure live price in summary even when LLM path used (non-blocking, no dup) — prepend if missing
-        if "Live:" not in summary:
-            try:
-                _snap2 = _pm_price_snapshot(rows)
-                if _snap2:
-                    summary = _snap2 + "\n\n" + summary
-            except Exception as _e:
-                print(f"[agent_pm] price prepend skipped (non-blocking): {_e}", file=sys.stderr)
+        points = clean_points(llm_text)
+        if llm_text and not points:
+            print("[agent_pm] free-ai summary had no bullet points — posting headlines only")
+            model_name = f"stub-{tier}"
+        summary = build_summary(rows, points, live_line)
         print("--- summary preview ---")
-        print(summary[:2000])
+        print(summary)
         print("--- end preview ---")
 
         if args.dry_run:
