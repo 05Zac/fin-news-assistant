@@ -181,8 +181,10 @@ _LEAK_RE = _re.compile(
     r"\bwe need to\b|\bi need to\b|\bconstraints?:|\bsentence \d|^output:|^style:|^focus:)",
     _re.IGNORECASE | _re.MULTILINE,
 )
-# Retry on a different routing profile so a reasoning-dump model isn't picked twice.
-_RETRY_MODELS = ("auto:reliable", "auto:smart")
+# Retry on a different routing profile so the same model isn't picked again. A client
+# timeout doesn't bench a model in the router, so plain "auto" retries hit the same slow
+# one (2026-11-26: nemotron-3-ultra-550b picked for auto, auto:reliable and auto:smart).
+_RETRY_MODELS = ("auto:fast", "auto:reliable")
 
 
 def _extract_answer(text: str | None, meta: dict) -> str | None:
