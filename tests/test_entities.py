@@ -68,6 +68,13 @@ class EntitiesTest(unittest.TestCase):
         # a bank giving its view is not news about the bank
         self.assertEqual(self.tags("Goldman sees oil majors lagging")[0], "WTI,XOM,CVX")
 
+    def test_passing_sector_mentions_do_not_tag_stocks(self):
+        # forecasters called "banks", and a theme named only in the body, are not about the stocks
+        self.assertEqual(self.tags("Euro slips; three banks see $1.08 next")[0], "EUR")
+        self.assertEqual(self.tags("Frank Elderson: Smart supervision for small banks")[0], None)
+        self.assertEqual(self.tags("Meeting of 28-29 October 2026", "ECB minutes. The AI investment cycle continued.")[0], "EUR")
+        self.assertEqual(self.tags("Earnings week ahead: big banks report")[0], "JPM,BAC,GS,WFC")
+
     def test_ai_fallback_only_accepts_known_codes(self):
         ids = [store.insert_article(self.conn, "investinglive", {
             "title": t, "description": "", "url": f"https://a.example/{i}",

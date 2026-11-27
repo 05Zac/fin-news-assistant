@@ -110,7 +110,7 @@ SEED = [
     ("SEMIS", "sector", "Semiconductors", "semiconductor|semiconductors|chip|chips|chipmaker|chipmakers|memory chips|microchip|microchips|processor|processors|GPU|GPUs|DRAM|NAND", "NVDA,AMD,INTC,TSM,MU,AVGO"),
     ("AI", "theme", "AI", "=AI|artificial intelligence|hyperscaler|hyperscalers|data center|data centers|OpenAI|Anthropic", "NVDA,MSFT,GOOGL"),
     ("TECH", "sector", "Technology", "tech|tech stocks|technology stocks|big tech|Magnificent 7|Magnificent Seven|Mag 7", "NDX,AAPL,MSFT,GOOGL,AMZN,META"),
-    ("BANKS", "sector", "Banks", "banks|banking|bank stocks|lenders", "JPM,BAC,GS,WFC"),
+    ("BANKS", "sector", "Banks", "bank stocks|bank shares|bank earnings|US banks|U.S. banks|big banks|Wall Street banks|lenders", "JPM,BAC,GS,WFC"),
     ("ENERGY", "sector", "Energy", "energy stocks|energy sector|oil majors|OPEC|OPEC+", "WTI,XOM,CVX"),
     ("AUTOS", "sector", "Autos", "automaker|automakers|carmaker|carmakers|EV|EVs|electric vehicle|electric vehicles", "TSLA,GM,F,TM"),
     ("EQUITIES", "theme", "Equities", "stocks|equities|stock market|Wall Street|indices|risk-off|risk-on|risk appetite", "SPX,NDX"),
@@ -264,8 +264,9 @@ def tag_text(conn: sqlite3.Connection, title: str, body: str = "") -> list[dict]
         for target in info[t["code"]][2]:
             if target in by_code and t["in_title"]:
                 by_code[target]["in_title"] = True  # body mention confirmed by the headline
-            if stock_in_title and target in info and info[target][0] == "stock":
-                continue
+            is_stock = target in info and info[target][0] == "stock"
+            if is_stock and (stock_in_title or (not t["in_title"] and t["kind"] in ("sector", "theme"))):
+                continue  # a sector named only in passing in the body says nothing about its stocks
             if target in info and target not in seen:
                 seen.add(target)
                 tags.append(
