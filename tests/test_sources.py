@@ -72,6 +72,15 @@ class SourcesTest(unittest.TestCase):
                          "Federal Reserve monetary policy.")
         self.assertEqual(sources.describe("gdelt", "u", desc="keep"), "keep")
 
+    def test_article_text_reads_only_the_release(self):
+        page = ("<html><nav><p>Menu menu menu menu menu menu menu menu menu menu</p></nav>"
+                "<div id='article'><p>The Federal Reserve Board on Tuesday released the minutes of its meetings.</p>"
+                "<script>var x = 'not this one, it is a script block';</script>"
+                "<p>For media inquiries, please email the press office or call us.</p></div>"
+                "<footer><p>Footer footer footer footer footer footer footer footer</p></footer></html>")
+        self.assertEqual(sources.article_text("fed", page),
+                         "The Federal Reserve Board on Tuesday released the minutes of its meetings.")
+
 
 if __name__ == "__main__":
     unittest.main()

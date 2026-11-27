@@ -22,6 +22,7 @@ import re
 import sqlite3
 import time
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -62,6 +63,75 @@ ECB_KINDS = {
     "press/key": "speech", "press/inter": "interview", "press/pr": "press release",
     "press/govcdec": "Governing Council decision", "press/blog": "blog post",
 }
+
+
+ARTICLE_CHARS = 1500
+# Where the release text sits on each site's page.
+ARTICLE_CONTAINER = {
+    "ecb": lambda tag, attrs: tag == "main",
+    "fed": lambda tag, attrs: attrs.get("id") == "article",
+}
+
+
+class _ArticleText(HTMLParser):
+    """Paragraph text inside the page's article container; skips nav, scripts, footers."""
+    SKIP = {"script", "style", "nav", "footer", "header", "aside", "noscript", "form"}
+
+    def __init__(self, is_container):
+        super().__init__(convert_charrefs=True)
+        self.is_container, self.depth, self.skip, self.cur, self.paras = is_container, 0, 0, None, []
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth or self.is_container(tag, dict(attrs)):
+            self.depth += 1  # inside the container: track nesting so we know when it closes
+        if tag in self.SKIP:
+            self.skip += 1
+        if self.depth and not self.skip and tag in ("p", "li"):
+            self.cur = []
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.skip:
+            self.skip -= 1
+        if self.cur is not None and tag in ("p", "li"):
+            text = re.sub(r"\s+", " ", " ".join(self.cur)).strip()
+            if len(text) > 40 and "media inquiries" not in text.lower():
+                self.paras.append(text)
+            self.cur = None
+        if self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if self.cur is not None and not self.skip:
+            self.cur.append(data)
+
+
+def article_text(source: str, page: str) -> str:
+    parser = _ArticleText(ARTICLE_CONTAINER[source])
+    parser.feed(page)
+    return " ".join(parser.paras)[:ARTICLE_CHARS]
+
+
+def fetch_official(source: str, limit: int, conn: sqlite3.Connection | None) -> list[dict]:
+    """Official RSS + the release text from each new item's page (already-stored URLs are not re-fetched)."""
+    items = fetch_rss(source, limit)
+    known = set()
+    if conn is not None and items:
+        urls = [a["url"] for a in items]
+        known = {r[0] for r in conn.execute(
+            f"SELECT url FROM raw_events WHERE url IN ({','.join('?' * len(urls))})", urls)}
+    for a in items:
+        if a["url"] in known or not a["url"]:
+            continue
+        try:
+            resp = requests.get(a["url"], timeout=20, headers=UA)
+            resp.raise_for_status()
+            body = article_text(source, resp.text)
+        except Exception as e:  # keep the one-line description; the alert still goes out
+            print(f"[sources] {source} article text skipped for {a['url'][:80]}: {type(e).__name__}")
+            continue
+        if body:
+            a["description"] = f"{a['description']} {body}"[: ARTICLE_CHARS + 200]
+    return items
 
 
 def describe(source: str, link: str, category: str = "", desc: str = "", title: str = "") -> str:
@@ -204,8 +274,8 @@ def fetch_gdelt(limit: int = 250, sleep=time.sleep) -> list[dict]:
 
 
 FETCHERS = {
-    "fed": lambda limit, conn: fetch_rss("fed", limit),
-    "ecb": lambda limit, conn: fetch_rss("ecb", limit),
+    "fed": lambda limit, conn: fetch_official("fed", limit, conn),
+    "ecb": lambda limit, conn: fetch_official("ecb", limit, conn),
     "ecb_fx": lambda limit, conn: fetch_rss("ecb_fx", limit),
     "gdelt": lambda limit, conn: fetch_gdelt(limit),
     "sec": lambda limit, conn: fetch_sec(limit, conn),
