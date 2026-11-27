@@ -47,6 +47,7 @@ class EntitiesTest(unittest.TestCase):
 
     def test_body_used_when_headline_names_nothing(self):
         self.assertEqual(self.tags("Morning wrap", "Gold rose while the yen fell.")[0], "XAU,JPY")
+        self.assertEqual(self.tags("Isabel Schnabel: Made in Europe", "European Central Bank (ECB) speech.")[0], "EUR")
 
     def test_tag_article_writes_links_and_columns(self):
         res = store.insert_article(self.conn, "investinglive", {

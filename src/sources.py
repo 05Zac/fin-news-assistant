@@ -54,6 +54,23 @@ class RateLimited(Exception):
 
 _DC_DATE = "{http://purl.org/dc/elements/1.1/}date"
 
+# The ECB feed has titles only ("Meeting of 28-29 October 2026"), so the AI note and the
+# tagger had nothing to go on. Say who published it and what kind of release it is.
+PUBLISHER = {"fed": "Federal Reserve", "ecb": "European Central Bank (ECB)"}
+ECB_KINDS = {
+    "press/accounts": "account (minutes) of a monetary policy meeting",
+    "press/key": "speech", "press/inter": "interview", "press/pr": "press release",
+    "press/govcdec": "Governing Council decision", "press/blog": "blog post",
+}
+
+
+def describe(source: str, link: str, category: str = "", desc: str = "", title: str = "") -> str:
+    if source not in PUBLISHER:
+        return desc
+    kind = category or next((v for k, v in ECB_KINDS.items() if f"/{k}/" in link), "release")
+    lead = f"{PUBLISHER[source]} {kind.lower() if category else kind}."
+    return lead if not desc or desc.strip() == title.strip() else f"{lead} {desc}"
+
 
 def fetch_rss(source: str, limit: int = 20) -> list[dict]:
     """Fetch an official RSS feed (RSS 2.0 or the RDF/RSS 1.0 the ECB uses)."""
@@ -77,7 +94,8 @@ def fetch_rss(source: str, limit: int = 20) -> list[dict]:
         out.append({
             "uuid": link,
             "title": html.unescape(get("title")),
-            "description": html.unescape(get("description"))[:800],
+            "description": describe(source, link, get("category"), html.unescape(get("description")),
+                                    html.unescape(get("title")))[:800],
             "url": link,
             "published_at": pub,
             "entities": [],

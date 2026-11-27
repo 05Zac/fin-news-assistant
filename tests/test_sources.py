@@ -63,6 +63,15 @@ class SourcesTest(unittest.TestCase):
         out = sources.fetch_sec(conn=self.conn, run=lambda args: reply)
         self.assertEqual([a["title"] for a in out], ["Apple (AAPL) 8-K: results (earnings)"])
 
+    def test_title_only_releases_get_a_description(self):
+        self.assertEqual(sources.describe("ecb", "https://www.ecb.europa.eu/press/accounts/2026/html/x.html",
+                                          title="Meeting of 28-29 October 2026"),
+                         "European Central Bank (ECB) account (minutes) of a monetary policy meeting.")
+        self.assertEqual(sources.describe("fed", "https://f.example/monetary20261124a.htm", "Monetary Policy",
+                                          "Minutes of the board", "Minutes of the board"),
+                         "Federal Reserve monetary policy.")
+        self.assertEqual(sources.describe("gdelt", "u", desc="keep"), "keep")
+
 
 if __name__ == "__main__":
     unittest.main()

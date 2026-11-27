@@ -286,7 +286,8 @@ def summarize_tags(tags: list[dict]) -> tuple[str | None, str | None]:
         title = [t for t in tags if match_kind(t) and t["in_title"]]
         if title:
             return sorted(title, key=lambda t: t["via"] != "mention")  # named first, then implied
-        return [t for t in tags if match_kind(t) and t["via"] == "mention"][:3]
+        body = [t for t in tags if match_kind(t)]  # named in the body first, then what those imply
+        return sorted(body, key=lambda t: t["via"] != "mention")[:3]
 
     symbols = [t["code"] for t in pick(lambda t: t["kind"] in TRADABLE_KINDS)][:MAX_SYMBOLS]
     topics = [t["name"] for t in pick(lambda t: t["kind"] not in TRADABLE_KINDS)]
